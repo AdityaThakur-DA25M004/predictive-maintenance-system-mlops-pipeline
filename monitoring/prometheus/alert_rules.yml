@@ -1,0 +1,136 @@
+# Prometheus Alert Rules for Predictive Maintenance System
+# Covers: error rate >5%, data drift, latency SLO, model quality, feedback accuracy
+
+groups:
+  - name: api_availability
+    interval: 30s
+    rules:
+      - alert: APIDown
+        expr: up{job="predictive-maintenance-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "Predictive Maintenance API is DOWN"
+          description: "The FastAPI backend has been unreachable for more than 1 minute."
+
+      - alert: ModelNotLoaded
+        expr: absent(model_f1_score) or model_f1_score == 0
+        for: 2m
+        labels:
+          severity: critical
+          component: model
+        annotations:
+          summary: "Model is not loaded or F1 is zero"
+          description: "Check the training pipeline or MLflow registry."
+
+  - name: api_performance
+    interval: 30s
+    rules:
+      - alert: HighErrorRate
+        # Assignment requirement: alert if error rate > 5%
+        expr: |
+          sum(rate(prediction_errors_total[5m]))
+          /
+          clamp_min(sum(rate(prediction_requests_total[5m])), 0.0001)
+          > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          component: api
+          slo: error_rate
+        annotations:
+          summary: "Prediction error rate exceeds 5%"
+          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes."
+
+      - alert: ElevatedErrorRate
+        expr: |
+          sum(rate(prediction_errors_total[5m]))
+          /
+          clamp_min(sum(rate(prediction_requests_total[5m])), 0.0001)
+          > 0.02
+        for: 5m
+        labels:
+          severity: warning
+          component: api
+        annotations:
+          summary: "Prediction error rate is elevated (>2%)"
+          description: "Error rate is {{ $value | humanizePercentage }} — investigate before SLO breach."
+
+      - alert: HighLatencyP95
+        # Business SLO: inference latency < 200 ms
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(prediction_latency_seconds_bucket[5m])) by (le)
+          ) > 0.2
+        for: 3m
+        labels:
+          severity: warning
+          component: api
+          slo: latency_p95
+        annotations:
+          summary: "p95 latency exceeds 200ms SLO"
+          description: "p95 latency is {{ $value }}s — business SLO is 200ms."
+
+      - alert: VeryHighLatencyP99
+        expr: |
+          histogram_quantile(0.99,
+            sum(rate(prediction_latency_seconds_bucket[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: critical
+          component: api
+        annotations:
+          summary: "p99 latency exceeds 500ms"
+          description: "p99 latency is {{ $value }}s — severely degraded."
+
+  - name: model_drift
+    interval: 1m
+    rules:
+      - alert: DataDriftDetected
+        # Assignment requirement: alert if data drift is detected
+        expr: drift_detected == 1
+        for: 5m
+        labels:
+          severity: warning
+          component: model
+        annotations:
+          summary: "Data drift detected"
+          description: "The drift detector has flagged drift. Consider retraining."
+
+      - alert: MultipleFeaturesDrifted
+        expr: drift_features_count >= 3
+        for: 2m
+        labels:
+          severity: critical
+          component: model
+        annotations:
+          summary: "3+ features exhibiting drift"
+          description: "{{ $value }} features have drifted simultaneously — retrain urgently."
+
+  - name: model_quality
+    interval: 1m
+    rules:
+      - alert: ModelF1Degraded
+        expr: model_f1_score < 0.5 and model_f1_score > 0
+        for: 10m
+        labels:
+          severity: warning
+          component: model
+        annotations:
+          summary: "Model F1 score below acceptance threshold (0.5)"
+          description: "Current F1 is {{ $value }}. Trigger retraining."
+
+      - alert: FeedbackAccuracyDegraded
+        # Real-world performance decay (ground-truth feedback loop)
+        expr: feedback_rolling_accuracy < 0.7 and feedback_rolling_accuracy > 0
+        for: 15m
+        labels:
+          severity: warning
+          component: model
+          slo: feedback_accuracy
+        annotations:
+          summary: "Rolling feedback accuracy below 70%"
+          description: "Live model accuracy from feedback is {{ $value | humanizePercentage }}."

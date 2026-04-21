@@ -1,0 +1,42 @@
+stages:
+  data_ingestion:
+    cmd: python -m src.data_ingestion
+    deps:
+      - src/data_ingestion.py
+      - src/utils.py
+      - data/raw/ai4i2020.csv
+      - configs/config.yaml
+    outs:
+      - data/processed/train.csv
+      - data/processed/test.csv
+
+  preprocessing:
+    cmd: python -m src.data_preprocessing
+    deps:
+      - src/data_preprocessing.py
+      - src/utils.py
+      - data/processed/train.csv
+      - data/processed/test.csv
+      - configs/config.yaml
+    outs:
+      - data/processed/train_processed.csv
+      - data/processed/test_processed.csv
+      - models/scaler.joblib
+      - data/baselines/drift_baselines.json
+
+  training:
+    cmd: python -m src.model_training
+    deps:
+      - src/model_training.py
+      - src/data_preprocessing.py
+      - src/utils.py
+      - data/processed/train_processed.csv
+      - data/processed/test_processed.csv
+      - configs/config.yaml
+    outs:
+      - models/best_model.joblib
+      - models/test_metrics.json
+      - models/classification_report.json
+    metrics:
+      - models/test_metrics.json:
+          cache: false

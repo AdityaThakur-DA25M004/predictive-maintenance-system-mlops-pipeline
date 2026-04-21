@@ -1,0 +1,44 @@
+# Core ML
+pandas==2.1.4
+numpy==1.26.2
+scikit-learn==1.3.2
+scipy==1.11.4
+joblib==1.3.2
+imbalanced-learn==0.11.0
+
+# API
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.2
+pydantic-settings==2.1.0
+python-multipart==0.0.6
+
+# MLflow
+mlflow==2.9.2
+
+# Monitoring
+prometheus-client==0.19.0
+prometheus-fastapi-instrumentator==6.1.0
+
+# Orchestration — runs inside Docker only, NOT installed on host Windows
+# apache-airflow==2.8.0
+
+# Frontend
+streamlit==1.29.0
+plotly==5.18.0
+requests==2.31.0
+
+# Data versioning
+dvc==3.30.1
+dvc-http==2.32.0
+dagshub==0.3.45
+
+# Config
+pyyaml==6.0.1
+
+# Testing
+pytest==7.4.3
+httpx==0.25.2
+
+# Utilities
+python-dotenv==1.0.0
