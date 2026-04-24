@@ -8,7 +8,7 @@ data:
   processed_dir: "data/processed"
   baselines_path: "data/baselines/drift_baselines.json"
   test_size: 0.2
-  random_state: 47
+  random_state: 41
 
 features:
   numeric:
@@ -30,9 +30,9 @@ features:
 model:
   algorithm: "RandomForest"
   hyperparameters:
-    n_estimators: [250]
-    max_depth: [10, null]
-    min_samples_split: [4, 7]
+    n_estimators: [300]
+    max_depth: [9, null]
+    min_samples_split: [6, 8]
     class_weight: ["balanced"]
   metrics:
     - "f1_score"
