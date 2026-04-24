@@ -37,5 +37,4 @@ stages:
       - models/best_model.joblib
       - models/classification_report.json
     metrics:
-      - models/test_metrics.json:
-          cache: false
+      - models/test_metrics.json
