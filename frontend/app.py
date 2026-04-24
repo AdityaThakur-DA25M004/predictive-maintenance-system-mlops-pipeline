@@ -1,7 +1,10 @@
 """
 Predictive Maintenance — Main Dashboard.
 """
+import sys
+import os
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import streamlit as st
 from frontend.common import APIError, get_client, render_header, render_sidebar, setup_page
 
@@ -56,6 +59,21 @@ try:
         rl = fb.get("rolling_accuracy")
         f2.metric("Overall accuracy", f"{ov:.1%}" if ov is not None else "—")
         f3.metric(f"Rolling (last {fb['window']})", f"{rl:.1%}" if rl is not None else "—")
+except APIError:
+    pass
+
+# ── Upload history summary ─────────────────────────────────────────────────
+try:
+    uploads = client.list_uploads()
+    upload_list = uploads.get("uploads", [])
+    if upload_list:
+        st.markdown("### 📂 Dataset Uploads")
+        import datetime
+        u1, u2 = st.columns(2)
+        u1.metric("CSV files uploaded", len(upload_list))
+        latest_ts = max(u["uploaded_at"] for u in upload_list)
+        latest_str = datetime.datetime.fromtimestamp(latest_ts).strftime("%Y-%m-%d %H:%M")
+        u2.metric("Latest upload", latest_str)
 except APIError:
     pass
 

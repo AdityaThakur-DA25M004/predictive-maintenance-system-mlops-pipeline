@@ -10,7 +10,7 @@ import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.preprocessing import StandardScaler
 import joblib
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -198,7 +198,6 @@ def run_preprocessing(config: dict | None = None) -> dict:
     test_df = engineer_features(test_df)
 
     feature_cols = get_feature_columns()
-    target = config["features"]["target"]
 
     # Drift baselines (on raw-scale training features)
     baselines = compute_drift_baselines(train_df, feature_cols)

@@ -18,3 +18,4 @@ htmlcov/
 .coverage
 .pytest_cache/
 .env.local
+.dvc/config.local

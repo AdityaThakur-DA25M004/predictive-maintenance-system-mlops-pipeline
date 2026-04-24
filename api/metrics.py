@@ -83,3 +83,59 @@ RETRAIN_TRIGGERS = Counter(
     "Total number of retraining triggers",
     ["reason"],
 )
+
+# ---------------------------------------------------------------------------
+# Upload & retraining observability metrics
+# ---------------------------------------------------------------------------
+UPLOAD_COUNT = Counter(
+    "dataset_uploads_total",
+    "Total number of CSV dataset uploads via /retrain/upload",
+    ["status"],          # "success" | "failed"
+)
+
+UPLOAD_ROWS = Gauge(
+    "upload_last_rows",
+    "Row count of the most recently uploaded dataset CSV",
+)
+
+UPLOAD_FILE_SIZE_BYTES = Gauge(
+    "upload_last_file_size_bytes",
+    "File size in bytes of the most recently uploaded dataset CSV",
+)
+
+RETRAIN_DATA_SOURCE = Gauge(
+    "retrain_data_source",
+    "Data source used in the last triggered retrain: 1=uploaded CSV, 0=default dataset",
+)
+
+TRAINING_DURATION_SECONDS = Histogram(
+    "training_duration_seconds",
+    "Wall-clock duration of the full training pipeline run in seconds",
+    buckets=[30, 60, 90, 120, 180, 240, 300, 420, 600],
+)
+
+LAST_TRAINING_TIMESTAMP = Gauge(
+    "last_training_timestamp_seconds",
+    "Unix timestamp of the most recent completed training run",
+)
+
+MODEL_VERSION_NUMERIC = Gauge(
+    "model_version_numeric",
+    "Numeric version of the currently deployed model (from MLflow registry)",
+)
+
+# ---------------------------------------------------------------------------
+# Alert notification metrics
+# ---------------------------------------------------------------------------
+ALERT_NOTIFICATIONS_TOTAL = Counter(
+    "alert_notifications_total",
+    "Total number of alert notifications dispatched by the system",
+    ["alert_type", "channel"],   # alert_type: drift|retrain|accuracy|error_rate|training_complete
+                                  # channel: email|log
+)
+
+ROLLBACK_TRIGGERS = Counter(
+    "rollback_triggers_total",
+    "Total number of model rollback operations",
+    ["status"],   # "success" | "failed"
+)

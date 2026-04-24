@@ -1,9 +1,13 @@
 """
 Prediction Page — Single, batch predictions, and ground-truth feedback.
 """
+import sys
+import os
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
 import streamlit as st
 
 from frontend.common import APIError, get_client, render_header, render_sidebar, setup_page
@@ -70,6 +74,17 @@ with tab_single:
             c3.metric("Risk Level", risk)
             c4.metric("Prediction ID", result.get("prediction_id", "—"))
 
+            # Inference time row
+            inf_ms = result.get("inference_time_ms")
+            if inf_ms is not None:
+                t1, t2, t3, t4 = st.columns(4)
+                t1.metric("Inference Time", f"{inf_ms:.1f} ms",
+                           help="Pure model scoring time (excludes API/network overhead)")
+                slo_color = "🟢" if inf_ms < 50 else ("🟡" if inf_ms < 200 else "🔴")
+                t2.metric("SLO Status (200 ms)", f"{slo_color} {'OK' if inf_ms < 200 else 'SLOW'}")
+                t3.metric("Model Version", result.get("model_version", "—"))
+                t4.metric("Algorithm", "Random Forest")
+
             # Gauge
             gauge = go.Figure(go.Indicator(
                 mode="gauge+number", value=prob * 100,
@@ -115,17 +130,73 @@ with tab_batch:
             readings = df[req].to_dict(orient="records")
             try:
                 with st.spinner(f"Scoring {len(readings)} readings…"):
+                    import time as _time
+                    t0 = _time.time()
                     result = client.predict_batch(readings)
+                    elapsed_ms = (_time.time() - t0) * 1000
             except APIError as e:
                 st.error(f"Batch failed — {e}")
             else:
-                b1, b2, b3 = st.columns(3)
-                b1.metric("Total", result["total"])
-                b2.metric("Failures", result["failures_detected"])
-                b3.metric("Failure Rate",
-                          f"{result['failures_detected']/max(result['total'],1):.1%}")
+                total = result["total"]
+                failures = result["failures_detected"]
+                per_row_ms = elapsed_ms / max(total, 1)
+
+                b1, b2, b3, b4, b5 = st.columns(5)
+                b1.metric("Total", total)
+                b2.metric("Failures", failures)
+                b3.metric("Failure Rate", f"{failures/max(total,1):.1%}")
+                b4.metric("Total Time", f"{elapsed_ms:.0f} ms")
+                b5.metric("Per-row", f"{per_row_ms:.1f} ms")
+
+                # Risk distribution donut
                 preds_df = pd.DataFrame(result["predictions"])
-                st.dataframe(preds_df, use_container_width=True, hide_index=True)
+                if "risk_level" in preds_df.columns:
+                    risk_counts = preds_df["risk_level"].value_counts().reset_index()
+                    risk_counts.columns = ["Risk Level", "Count"]
+                    risk_order = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
+                    risk_color_map = {
+                        "LOW": "#22c55e", "MEDIUM": "#eab308",
+                        "HIGH": "#f97316", "CRITICAL": "#ef4444",
+                    }
+                    risk_counts["Risk Level"] = pd.Categorical(
+                        risk_counts["Risk Level"], categories=risk_order, ordered=True
+                    )
+                    risk_counts = risk_counts.sort_values("Risk Level")
+                    fig_donut = px.pie(
+                        risk_counts, names="Risk Level", values="Count",
+                        hole=0.55, title="Risk Distribution",
+                        color="Risk Level",
+                        color_discrete_map=risk_color_map,
+                    )
+                    fig_donut.update_traces(textposition="outside", textinfo="label+percent")
+                    fig_donut.update_layout(
+                        height=320, margin=dict(l=10, r=10, t=40, b=10),
+                        showlegend=False,
+                    )
+
+                    dc1, dc2 = st.columns([1, 2])
+                    with dc1:
+                        st.plotly_chart(fig_donut, use_container_width=True)
+                    with dc2:
+                        # Inference time distribution if available
+                        if "inference_time_ms" in preds_df.columns:
+                            inf_times = preds_df["inference_time_ms"].dropna()
+                            if not inf_times.empty:
+                                st.markdown("**Inference time (ms)**")
+                                t1, t2, t3 = st.columns(3)
+                                t1.metric("Min", f"{inf_times.min():.1f}")
+                                t2.metric("Mean", f"{inf_times.mean():.1f}")
+                                t3.metric("Max", f"{inf_times.max():.1f}")
+
+                        st.dataframe(
+                            preds_df[["prediction", "failure_probability",
+                                      "risk_level", "inference_time_ms",
+                                      "prediction_id"]].head(20),
+                            use_container_width=True, hide_index=True,
+                        )
+                else:
+                    st.dataframe(preds_df, use_container_width=True, hide_index=True)
+
                 st.download_button("📥 Download CSV",
                                    preds_df.to_csv(index=False).encode(),
                                    "predictions.csv", "text/csv")

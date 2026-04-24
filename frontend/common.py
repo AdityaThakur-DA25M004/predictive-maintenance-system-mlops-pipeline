@@ -60,8 +60,10 @@ class APIClient:
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
         kwargs.setdefault("timeout", self._cfg.request_timeout)
+        # Only set Content-Type for JSON requests; let requests handle multipart
+        headers = kwargs.pop("headers", {})
         try:
-            resp = self._session.request(method, self._url(path), **kwargs)
+            resp = self._session.request(method, self._url(path), headers=headers, **kwargs)
         except requests.ConnectionError:
             raise APIError(f"Cannot reach API at {self._cfg.api_url}")
         except requests.Timeout:
@@ -79,6 +81,9 @@ class APIClient:
 
     def model_info(self) -> dict:
         return self._request("GET", "/model/info")
+
+    def feature_importance(self) -> dict:
+        return self._request("GET", "/model/feature-importance")
 
     def predict(self, reading: dict) -> dict:
         return self._request("POST", "/predict", json=reading)
@@ -99,6 +104,19 @@ class APIClient:
     def trigger_retrain(self, reason: str, api_key: str) -> dict:
         return self._request("POST", "/retrain",
                              params={"reason": reason}, headers={"X-API-Key": api_key})
+
+    def retrain_with_upload(self, file_bytes: bytes, filename: str,
+                            reason: str, api_key: str) -> dict:
+        return self._request(
+            "POST", "/retrain/upload",
+            files={"file": (filename, file_bytes, "text/csv")},
+            data={"reason": reason},
+            headers={"X-API-Key": api_key},
+            timeout=60,
+        )
+
+    def list_uploads(self) -> dict:
+        return self._request("GET", "/retrain/uploads")
 
 
 @st.cache_resource
@@ -140,6 +158,20 @@ def render_header(title: str, subtitle: str) -> None:
     )
 
 
+def _is_reachable(url: str, timeout: float = 1.5) -> bool:
+    """Quick TCP check — returns True if the host:port is listening."""
+    import socket
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        host = p.hostname or "localhost"
+        port = p.port or (443 if p.scheme == "https" else 80)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def render_sidebar() -> None:
     cfg = get_config()
     client = get_client()
@@ -154,9 +186,23 @@ def render_sidebar() -> None:
         except APIError:
             st.markdown("🔴 API offline")
         st.divider()
+
+        # External tools — show availability status
         st.markdown("**External tools**")
-        st.markdown(f"- [🔬 MLflow]({cfg.mlflow_url})")
-        st.markdown(f"- [🌀 Airflow]({cfg.airflow_url})")
-        st.markdown(f"- [📊 Grafana]({cfg.grafana_url})")
-        st.markdown(f"- [🔢 Prometheus]({cfg.prometheus_url})")
-        st.markdown(f"- [📘 API docs]({cfg.api_url}/docs)")
+        tools = [
+            ("🔬 MLflow",     cfg.mlflow_url),
+            ("🌀 Airflow",    cfg.airflow_url),
+            ("📊 Grafana",    cfg.grafana_url),
+            ("🔢 Prometheus", cfg.prometheus_url),
+            ("📘 API docs",   f"{cfg.api_url}/docs"),
+        ]
+        for label, url in tools:
+            reachable = _is_reachable(url)
+            if reachable:
+                st.markdown(f"- [{label}]({url})")
+            else:
+                st.markdown(
+                    f"- {label} — "
+                    f"<span style='color:#f97316;font-size:0.8em;'>not running locally</span>",
+                    unsafe_allow_html=True,
+                )

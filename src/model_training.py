@@ -8,12 +8,11 @@ the best model in the MLflow Model Registry.
 
 import os
 import sys
-import json
+import time as _time
+import subprocess
 import pandas as pd
-import numpy as np
 from pathlib import Path
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.model_selection import GridSearchCV, cross_val_score
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import (
     f1_score, precision_score, recall_score,
     roc_auc_score, accuracy_score, confusion_matrix,
@@ -28,6 +27,36 @@ from src.utils import setup_logger, load_config, get_project_root, ensure_dir, s
 from src.data_preprocessing import get_feature_columns
 
 logger = setup_logger(__name__)
+
+# Resolved at import time — same env var as data_ingestion and the API container.
+UPLOADS_DIR = os.environ.get("UPLOADS_DIR", "data/feedback/uploads")
+
+
+def _get_git_commit() -> str:
+    """Return the current HEAD commit hash, or 'unknown' if git is unavailable."""
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def get_latest_training_file(config: dict | None = None) -> str | None:
+    """
+    Return the path to the most-recently modified uploaded CSV, or None if
+    no uploads exist.  Used by run_training() to decide whether the processed
+    datasets need to be regenerated before model fitting.
+    """
+    dir_path = Path(UPLOADS_DIR)
+    if not dir_path.exists():
+        return None
+    files = list(dir_path.glob("*.csv"))
+    if not files:
+        return None
+    latest = max(files, key=lambda f: f.stat().st_mtime)
+    logger.info(f"[UPLOAD] Latest upload found: {latest}")
+    return str(latest)
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +137,10 @@ def train_model(
     best_params = {}
     best_run_id = None
 
+    # Resolve once so every run in the grid shares the same commit tag
+    git_commit = _get_git_commit()
+    logger.info(f"Git commit: {git_commit}")
+
     # Grid search with MLflow logging
     for n_est in param_grid["n_estimators"]:
         for max_d in param_grid["max_depth"]:
@@ -127,6 +160,10 @@ def train_model(
                         mlflow.log_param("algorithm", "RandomForest")
                         mlflow.log_param("n_features", X_train.shape[1])
                         mlflow.log_param("n_train_samples", X_train.shape[0])
+                        # Reproducibility (guideline §I — every experiment reproducible
+                        # via git commit hash + MLflow run ID)
+                        mlflow.log_param("git_commit", git_commit)
+                        mlflow.set_tag("git_commit", git_commit)
 
                         # Train
                         model = RandomForestClassifier(**params)
@@ -149,8 +186,12 @@ def train_model(
                         ))
                         mlflow.log_dict(feat_imp, "feature_importance.json")
 
-                        # Log model artifact
-                        mlflow.sklearn.log_model(model, "model")
+                        # Log model with input example to suppress MLflow signature warning
+                        input_example = X_train.iloc[:1]
+                        mlflow.sklearn.log_model(
+                            model, "model",
+                            input_example=input_example,
+                        )
 
                         # Track best
                         current_f1 = test_metrics["f1_score"]
@@ -212,6 +253,9 @@ def run_training(config: dict | None = None) -> dict:
     Execute the full training pipeline.
 
     Steps:
+        0. [NEW] Check if an uploaded file is newer than the processed data.
+           If so (or if processed data is missing), re-run ingestion and
+           preprocessing automatically so training always uses the right data.
         1. Load processed train/test data.
         2. Train models with hyperparameter search + MLflow logging.
         3. Save the best model locally.
@@ -231,7 +275,40 @@ def run_training(config: dict | None = None) -> dict:
     models_dir = str(root / "models")
     ensure_dir(models_dir)
 
-    # Load processed data
+    # ── Step 0: Decide whether ingestion+preprocessing must run first ──
+    train_processed = Path(processed_dir) / "train_processed.csv"
+    latest_upload = get_latest_training_file(config)
+    needs_reprocess = False
+
+    if not train_processed.exists():
+        logger.info("[PIPELINE] Processed data missing — running ingestion + preprocessing")
+        needs_reprocess = True
+    elif latest_upload:
+        upload_mtime = Path(latest_upload).stat().st_mtime
+        processed_mtime = train_processed.stat().st_mtime
+        if upload_mtime > processed_mtime:
+            logger.info(
+                f"[UPLOAD] Uploaded file ({Path(latest_upload).name}) is newer than "
+                f"processed data — re-running ingestion + preprocessing"
+            )
+            needs_reprocess = True
+        else:
+            logger.info(
+                "[UPLOAD] Processed data is already up-to-date with latest upload"
+            )
+
+    if needs_reprocess:
+        from src.data_ingestion import run_ingestion
+        from src.data_preprocessing import run_preprocessing
+        ingest_result = run_ingestion(config)
+        logger.info(
+            f"[PIPELINE] Ingestion done — source={ingest_result['data_source']} "
+            f"rows={ingest_result['train_rows']}+{ingest_result['test_rows']}"
+        )
+        run_preprocessing(config)
+        logger.info("[PIPELINE] Preprocessing done")
+
+    # ── Step 1: Load processed data ────────────────────────────────────
     train_df = pd.read_csv(os.path.join(processed_dir, "train_processed.csv"))
     test_df = pd.read_csv(os.path.join(processed_dir, "test_processed.csv"))
 
@@ -246,8 +323,19 @@ def run_training(config: dict | None = None) -> dict:
     logger.info(f"Training data: {X_train.shape} | Test data: {X_test.shape}")
     logger.info(f"Target distribution (train): {y_train.value_counts().to_dict()}")
 
-    # Train with MLflow
+    # Train with MLflow — timed for Prometheus
+    t0 = _time.time()
     result = train_model(X_train, y_train, X_test, y_test, config)
+    training_duration = _time.time() - t0
+    logger.info(f"Training completed in {training_duration:.1f}s")
+
+    # Emit Prometheus metrics (non-fatal — workers may not have the API metrics module)
+    try:
+        from api.metrics import TRAINING_DURATION_SECONDS, LAST_TRAINING_TIMESTAMP
+        TRAINING_DURATION_SECONDS.observe(training_duration)
+        LAST_TRAINING_TIMESTAMP.set(_time.time())
+    except Exception:
+        pass  # Airflow workers don't load the API metrics registry
 
     # Save best model locally
     model_path = os.path.join(models_dir, "best_model.joblib")
@@ -267,6 +355,18 @@ def run_training(config: dict | None = None) -> dict:
     model_name = config["mlflow"]["model_name"]
     version = register_best_model(result["best_run_id"], model_name, config)
 
+    # Tag the best run with audit metadata (no run reopen — avoids URI conflicts)
+    data_src = "uploaded" if latest_upload and needs_reprocess else "existing_processed"
+    try:
+        mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", config["mlflow"]["tracking_uri"])
+        client = mlflow.tracking.MlflowClient(tracking_uri=mlflow_uri)
+        client.set_tag(result["best_run_id"], "data_source", data_src)
+        client.set_tag(result["best_run_id"], "training_duration_s", f"{training_duration:.1f}")
+        client.set_tag(result["best_run_id"], "model_version", str(version))
+        logger.info(f"Tagged run {result['best_run_id']} with data_source={data_src}")
+    except Exception as _te:
+        logger.warning(f"Post-run tagging skipped: {_te}")
+
     return {
         "status": "success",
         "model_path": model_path,
@@ -275,6 +375,9 @@ def run_training(config: dict | None = None) -> dict:
         "best_run_id": result["best_run_id"],
         "model_version": version,
         "test_metrics": test_metrics,
+        "data_source": data_src,
+        "training_duration_seconds": round(training_duration, 1),
+        "git_commit": _get_git_commit(),
     }
 
 

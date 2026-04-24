@@ -1,12 +1,7 @@
 """
 Airflow DAG for the Predictive Maintenance ML Pipeline.
 
-Orchestrates the end-to-end workflow:
-  1. Data Ingestion → Validate → Split
-  2. Feature Engineering → Drift Baselines
-  3. Model Training → Evaluation → Registration
-  4. Drift Detection Check
-  5. Conditional Retraining Trigger
+Orchestrates: ingest → preprocess → train → drift check → branch
 """
 
 from datetime import datetime, timedelta
@@ -18,15 +13,11 @@ import os
 import json
 import logging
 
-# Add project root to path
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/app")
 sys.path.insert(0, PROJECT_ROOT)
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Default DAG arguments
-# ---------------------------------------------------------------------------
 default_args = {
     "owner": "ml-team",
     "depends_on_past": False,
@@ -38,17 +29,18 @@ default_args = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Task callables
-# ---------------------------------------------------------------------------
 def task_data_ingestion(**kwargs):
-    """Run data ingestion pipeline."""
     from src.data_ingestion import run_ingestion
     result = run_ingestion()
-    logger.info(f"Ingestion result: {result['status']}")
-    # Push result to XCom for downstream tasks
+    logger.info(
+        f"Ingestion result: {result['status']} | "
+        f"source={result.get('data_source', 'unknown')} | "
+        f"path={result.get('raw_path', 'unknown')}"
+    )
     kwargs["ti"].xcom_push(key="ingestion_result", value=json.dumps({
         "status": result["status"],
+        "data_source": result.get("data_source", "default"),
+        "raw_path": result.get("raw_path", ""),
         "train_rows": result["train_rows"],
         "test_rows": result["test_rows"],
         "quality_status": result["quality_report"]["quality_status"],
@@ -57,7 +49,6 @@ def task_data_ingestion(**kwargs):
 
 
 def task_preprocessing(**kwargs):
-    """Run feature engineering and scaling pipeline."""
     from src.data_preprocessing import run_preprocessing
     result = run_preprocessing()
     logger.info(f"Preprocessing result: {result['status']}")
@@ -69,39 +60,57 @@ def task_preprocessing(**kwargs):
 
 
 def task_model_training(**kwargs):
-    """Run model training with MLflow tracking."""
+    import time as _time
     from src.model_training import run_training
+
+    t0 = _time.time()
     result = run_training()
-    logger.info(f"Training result: {result['status']} | F1={result['best_f1']:.4f}")
+    duration_s = _time.time() - t0
+
+    logger.info(
+        f"Training result: {result['status']} | F1={result['best_f1']:.4f} | "
+        f"data_source={result.get('data_source', 'unknown')} | "
+        f"duration={duration_s:.0f}s"
+    )
+
+    # Send training-complete alert (email/log) — non-fatal
+    try:
+        from src.alert_notifier import send_training_complete_alert
+        send_training_complete_alert(
+            new_f1=result["best_f1"],
+            model_version=str(result["model_version"]),
+            run_id=result["best_run_id"],
+            data_source=result.get("data_source", "unknown"),
+            duration_seconds=duration_s,
+        )
+    except Exception as e:
+        logger.warning(f"Training-complete alert failed (non-fatal): {e}")
+
     kwargs["ti"].xcom_push(key="training_result", value=json.dumps({
         "status": result["status"],
         "best_f1": result["best_f1"],
         "best_run_id": result["best_run_id"],
         "model_version": str(result["model_version"]),
+        "data_source": result.get("data_source", "unknown"),
+        "duration_seconds": round(duration_s, 1),
     }))
     return result["status"]
 
 
 def task_drift_check(**kwargs):
-    """Check for data drift on test set against baselines."""
-    from src.drift_detection import check_drift_from_file
-    from src.data_preprocessing import get_feature_columns
-    from src.utils import get_project_root, load_config
+    import pandas as pd
+    from src.data_preprocessing import engineer_features, get_feature_columns
+    from src.drift_detection import detect_drift
+    from src.utils import load_config, get_project_root, load_json
 
     config = load_config()
     root = get_project_root()
-    data_path = str(root / config["data"]["processed_dir"] / "test.csv")
-    baselines_path = str(root / config["data"]["baselines_path"])
+    data_path = os.path.join(str(root), config["data"]["processed_dir"], "test.csv")
+    baselines_path = os.path.join(str(root), config["data"]["baselines_path"])
 
-    # Need to engineer features on test data first
-    import pandas as pd
-    from src.data_preprocessing import engineer_features
     df = pd.read_csv(data_path)
     df = engineer_features(df)
-
     feature_cols = get_feature_columns()
-    from src.drift_detection import detect_drift
-    from src.utils import load_json
     baselines = load_json(baselines_path)
     report = detect_drift(df, baselines, feature_cols)
 
@@ -115,11 +124,12 @@ def task_drift_check(**kwargs):
 
 
 def branch_on_drift(**kwargs):
-    """Branch based on drift detection result."""
     ti = kwargs["ti"]
     drift_json = ti.xcom_pull(key="drift_result", task_ids="drift_check")
+    if not drift_json:
+        logger.warning("drift_result XCom is empty — defaulting to no_drift_end")
+        return "no_drift_end"
     drift = json.loads(drift_json)
-
     if drift["overall_drift"]:
         logger.warning("Drift detected — branching to retraining path")
         return "retrain_notification"
@@ -129,20 +139,35 @@ def branch_on_drift(**kwargs):
 
 
 def task_retrain_notification(**kwargs):
-    """Log retraining notification (in production, would trigger alerts)."""
     ti = kwargs["ti"]
     drift_json = ti.xcom_pull(key="drift_result", task_ids="drift_check")
+    if not drift_json:
+        logger.warning("drift_result XCom empty in retrain_notification — skipping alerts")
+        return "retrain_triggered"
     drift = json.loads(drift_json)
-    logger.warning(
-        f"RETRAINING RECOMMENDED: Drift detected in features: "
-        f"{drift['drifted_features']}"
-    )
+    logger.warning(f"RETRAINING RECOMMENDED: Drift in features: {drift['drifted_features']}")
+
+    # Alert 1: drift detected
+    try:
+        from src.alert_notifier import send_drift_alert
+        send_drift_alert(drift["drifted_features"], drift["n_drifted"])
+    except Exception as e:
+        logger.warning(f"Drift alert failed (non-fatal): {e}")
+
+    # Alert 2: retraining triggered (from Airflow)
+    try:
+        from src.alert_notifier import send_retrain_alert
+        send_retrain_alert(
+            reason="drift_detected",
+            triggered_by="airflow",
+            data_source="unknown",   # will be known after ingestion runs
+        )
+    except Exception as e:
+        logger.warning(f"Retrain alert failed (non-fatal): {e}")
+
     return "retrain_triggered"
 
 
-# ---------------------------------------------------------------------------
-# DAG definition
-# ---------------------------------------------------------------------------
 with DAG(
     dag_id="predictive_maintenance_pipeline",
     default_args=default_args,
@@ -150,53 +175,37 @@ with DAG(
     schedule_interval=timedelta(days=1),
     catchup=False,
     tags=["ml", "predictive-maintenance", "mlops"],
-    doc_md="""
-    ## Predictive Maintenance ML Pipeline
-
-    This DAG runs the full ML lifecycle:
-    1. **Data Ingestion**: Load, validate, and split data.
-    2. **Preprocessing**: Feature engineering and scaling.
-    3. **Training**: Model training with MLflow experiment tracking.
-    4. **Drift Check**: Compare current data against baselines.
-    5. **Branch**: Trigger retraining if drift is detected.
-    """,
 ) as dag:
 
-    # Tasks
+    # NOTE: provide_context is removed — it's automatic in Airflow 2.x
     ingest = PythonOperator(
         task_id="data_ingestion",
         python_callable=task_data_ingestion,
-        provide_context=True,
     )
 
     preprocess = PythonOperator(
         task_id="preprocessing",
         python_callable=task_preprocessing,
-        provide_context=True,
     )
 
     train = PythonOperator(
         task_id="model_training",
         python_callable=task_model_training,
-        provide_context=True,
     )
 
     drift = PythonOperator(
         task_id="drift_check",
         python_callable=task_drift_check,
-        provide_context=True,
     )
 
     branch = BranchPythonOperator(
         task_id="drift_branch",
         python_callable=branch_on_drift,
-        provide_context=True,
     )
 
     retrain_notify = PythonOperator(
         task_id="retrain_notification",
         python_callable=task_retrain_notification,
-        provide_context=True,
     )
 
     no_drift = EmptyOperator(task_id="no_drift_end")
@@ -206,7 +215,6 @@ with DAG(
         trigger_rule="none_failed_min_one_success",
     )
 
-    # Dependencies
     ingest >> preprocess >> train >> drift >> branch
     branch >> [retrain_notify, no_drift]
     [retrain_notify, no_drift] >> pipeline_end

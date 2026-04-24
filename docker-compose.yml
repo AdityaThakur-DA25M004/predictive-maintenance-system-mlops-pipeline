@@ -1,9 +1,6 @@
 # ============================================================
 # Predictive Maintenance System — Docker Compose
 # ============================================================
-# Usage:
-#   cp .env.example .env   # fill in real values
-#   docker compose up --build -d
 
 x-airflow-common: &airflow-common
   build:
@@ -22,8 +19,10 @@ x-airflow-common: &airflow-common
     MLFLOW_TRACKING_PASSWORD: ${MLFLOW_TRACKING_PASSWORD}
     PROJECT_ROOT: /app
     PYTHONPATH: /opt/airflow:/app
+    UPLOADS_DIR: /app/data/feedback/uploads
   volumes:
     - ./airflow/dags:/opt/airflow/dags
+    - airflow_db:/opt/airflow            # SHARED volume so all airflow containers see the same SQLite DB
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
     - ./src:/app/src
@@ -35,7 +34,7 @@ x-airflow-common: &airflow-common
       condition: service_healthy
 
 services:
-  # ── Postgres (Airflow metadata) ─────────────────────────
+  # ── Postgres ────────────────────────────────────────────
   postgres:
     image: postgres:15-alpine
     container_name: pm-postgres
@@ -56,7 +55,7 @@ services:
     restart: unless-stopped
     networks: [pm-net]
 
-  # ── MLflow Tracking Server ──────────────────────────────
+  # ── MLflow ──────────────────────────────────────────────
   mlflow:
     build:
       context: .
@@ -82,9 +81,10 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       PYTHONPATH: /app
       RETRAIN_API_KEY: ${RETRAIN_API_KEY}
-      CORS_ORIGINS: "http://localhost:8501,http://frontend:8501"
+      CORS_ORIGINS: "http://localhost:${FRONTEND_PORT},http://frontend:8501"
       FEEDBACK_DB_PATH: /app/data/feedback/feedback.db
       FEEDBACK_WINDOW: "100"
+      UPLOADS_DIR: /app/data/feedback/uploads
     ports:
       - "${API_PORT}:8000"
     volumes:
@@ -99,6 +99,8 @@ services:
     networks: [pm-net]
 
   # ── Streamlit Frontend ──────────────────────────────────
+  # Always runs on 8501 INSIDE the container.
+  # FRONTEND_PORT maps the HOST port (e.g. 3000→8501).
   frontend:
     build:
       context: .
@@ -149,7 +151,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 60s
     restart: unless-stopped
     networks: [pm-net]
 
@@ -214,3 +216,4 @@ volumes:
   feedback_data:
   prometheus_data:
   grafana_data:
+  airflow_db:       # Shared volume for Airflow SQLite DB

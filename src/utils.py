@@ -3,7 +3,6 @@ Utility functions for the Predictive Maintenance System.
 Provides logging configuration, config loading, and shared helpers.
 """
 
-import os
 import logging
 import yaml
 import json

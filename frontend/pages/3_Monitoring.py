@@ -1,7 +1,10 @@
 """
 Monitoring Page — Model quality, drift detection, retrain triggers.
 """
+import sys
+import os
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -51,6 +54,64 @@ with tab_model:
                         color_continuous_scale="Blues")
         fig.update_layout(height=360, margin=dict(l=40, r=40, t=20, b=20))
         st.plotly_chart(fig, use_container_width=True)
+
+        # ── Feature importance ─────────────────────────────────────────
+        st.markdown("#### 🌲 Feature Importance")
+        try:
+            fi_data = client.feature_importance()
+            fi = fi_data.get("feature_importance", {})
+            if fi:
+                fi_df = pd.DataFrame(
+                    {"Feature": list(fi.keys()), "Importance": list(fi.values())}
+                ).sort_values("Importance")
+                fig_fi = px.bar(
+                    fi_df, x="Importance", y="Feature", orientation="h",
+                    color="Importance", color_continuous_scale="Blues",
+                    text=fi_df["Importance"].map(lambda v: f"{v:.4f}"),
+                )
+                fig_fi.update_traces(textposition="outside")
+                fig_fi.update_layout(
+                    height=380, margin=dict(l=10, r=60, t=10, b=10),
+                    coloraxis_showscale=False,
+                    yaxis=dict(tickfont=dict(size=12)),
+                )
+                st.plotly_chart(fig_fi, use_container_width=True)
+                top = fi_data.get("top_feature", "—")
+                st.caption(f"Most predictive feature: **{top}**")
+        except APIError:
+            st.info("Feature importance not available — model may not be loaded.")
+
+        # ── Classification Report ──────────────────────────────────────
+        st.markdown("#### 📋 Classification Report")
+        try:
+            report = info.get("classification_report") or {}
+            if report:
+                cls_rows = []
+                for label, label_name in [("0", "Healthy"), ("1", "Failure")]:
+                    if label in report:
+                        r = report[label]
+                        cls_rows.append({
+                            "Class": label_name,
+                            "Precision": f"{r.get('precision', 0):.3f}",
+                            "Recall": f"{r.get('recall', 0):.3f}",
+                            "F1-Score": f"{r.get('f1-score', 0):.3f}",
+                            "Support": int(r.get("support", 0)),
+                        })
+                if "macro avg" in report:
+                    m = report["macro avg"]
+                    cls_rows.append({
+                        "Class": "Macro avg",
+                        "Precision": f"{m.get('precision', 0):.3f}",
+                        "Recall": f"{m.get('recall', 0):.3f}",
+                        "F1-Score": f"{m.get('f1-score', 0):.3f}",
+                        "Support": int(m.get("support", 0)),
+                    })
+                if cls_rows:
+                    st.dataframe(
+                        pd.DataFrame(cls_rows), use_container_width=True, hide_index=True
+                    )
+        except Exception:
+            pass
     else:
         st.info("No test metrics available yet. Run the training pipeline.")
 
@@ -79,7 +140,11 @@ with tab_drift:
     if mode == "Simulated":
         col1, col2 = st.columns(2)
         with col1:
-            n_samples = st.slider("Samples", 50, 1000, 200)
+            n_samples = st.slider(
+                "Samples", min_value=5, max_value=1000, value=200,
+                help="Minimum 3 samples required for statistical testing. "
+                     "Use 50+ for reliable results.",
+            )
         with col2:
             scenario = st.selectbox("Scenario", [
                 "No drift (baseline)", "Temperature drift (+3σ)",
@@ -151,14 +216,125 @@ with tab_drift:
 
 # ══ Retrain ══════════════════════════════════════════════════════════════
 with tab_retrain:
-    st.markdown("#### Manual retrain trigger")
-    st.caption("Protected by API key (`RETRAIN_API_KEY` env var).")
+    st.markdown("#### 🔁 Retrain Pipeline")
+
+    # ── Pipeline component timing ──────────────────────────────────────
+    with st.expander("⏱️ Estimated Pipeline Component Times", expanded=False):
+        st.caption("Based on AI4I 2020 dataset (~10 k rows). Times scale with dataset size.")
+        timing_data = {
+            "Stage": [
+                "📥 Data Ingestion",
+                "🔧 Feature Engineering & Scaling",
+                "🧠 Model Training (grid search, 8 combos)",
+                "📡 Drift Detection",
+                "🚀 Model Registration (MLflow)",
+                "🔄 Total Pipeline",
+            ],
+            "Estimated Time": ["5–10 s", "10–20 s", "60–180 s", "5–10 s", "3–8 s", "1.5–4 min"],
+            "Bottleneck?": ["No", "No", "✅ Yes", "No", "No", "—"],
+            "Parallelisable?": ["No", "No", "Yes (Ray/Dask)", "No", "No", "—"],
+        }
+        st.dataframe(pd.DataFrame(timing_data), use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Upload → Store → Retrain ───────────────────────────────────────
+    st.markdown("##### 📂 Upload New Dataset → Store → Retrain")
+    st.caption(
+        "Upload a raw CSV matching the AI4I schema. It will be validated, stored on the server, "
+        "and marked ready for the next Airflow run. Requires API key."
+    )
+
+    with st.expander("📋 Required CSV columns", expanded=False):
+        st.code(
+            "Type, Air temperature [K], Process temperature [K],\n"
+            "Rotational speed [rpm], Torque [Nm], Tool wear [min], Machine failure",
+            language="text",
+        )
+        st.caption("Optional: UDI, Product ID, TWF, HDF, PWF, OSF, RNF (leaky columns are dropped automatically)")
+
+    up_col1, up_col2 = st.columns([3, 2])
+    with up_col1:
+        upload_file = st.file_uploader(
+            "Select CSV file", type=["csv"], key="retrain_upload",
+            help="Raw sensor data CSV — will be validated before storage",
+        )
+    with up_col2:
+        upload_reason = st.selectbox(
+            "Retrain reason",
+            ["csv_upload", "drift_detected", "performance_degradation", "scheduled", "manual"],
+            key="upload_reason",
+        )
+        upload_key = st.text_input("API key", type="password", key="upload_api_key")
+
+    if upload_file is not None:
+        try:
+            preview_df = pd.read_csv(upload_file)
+            upload_file.seek(0)  # reset for actual upload
+            st.markdown(f"**Preview** — {len(preview_df):,} rows × {len(preview_df.columns)} columns")
+            st.dataframe(preview_df.head(5), use_container_width=True, hide_index=True)
+
+            # Quick schema check in UI before sending
+            required_cols = [
+                "Type", "Air temperature [K]", "Process temperature [K]",
+                "Rotational speed [rpm]", "Torque [Nm]", "Tool wear [min]", "Machine failure",
+            ]
+            missing_cols = [c for c in required_cols if c not in preview_df.columns]
+            if missing_cols:
+                st.error(f"❌ Missing columns: {missing_cols}")
+            else:
+                st.success(f"✅ Schema valid — {len(preview_df):,} rows ready to upload")
+
+                col_btn1, col_btn2 = st.columns([1, 3])
+                with col_btn1:
+                    do_upload = st.button(
+                        "🚀 Upload & Store",
+                        type="primary",
+                        disabled=not upload_key,
+                        use_container_width=True,
+                    )
+                with col_btn2:
+                    if not upload_key:
+                        st.warning("⚠️ Enter API key to enable upload")
+
+                if do_upload and upload_key:
+                    file_bytes = upload_file.read()
+                    try:
+                        with st.spinner(f"Uploading {len(preview_df):,} rows to server…"):
+                            res = client.retrain_with_upload(
+                                file_bytes, upload_file.name, upload_reason, upload_key
+                            )
+                        st.success(f"✅ {res['message']}")
+                        uc1, uc2, uc3 = st.columns(3)
+                        uc1.metric("Rows stored", f"{res['rows']:,}")
+                        uc2.metric("Filename", res["filename"])
+                        uc3.metric("Status", res["status"])
+                        st.info(
+                            "**Next step:** Go to [Airflow UI](%s) → trigger DAG "
+                            "`predictive_maintenance_pipeline` to train on this dataset." % cfg.airflow_url
+                        )
+                    except APIError as e:
+                        if e.status_code == 401:
+                            st.error("❌ Unauthorized — check the API key.")
+                        else:
+                            st.error(f"Upload failed — {e}")
+        except Exception as e:
+            st.error(f"Could not read file: {e}")
+
+    st.divider()
+
+    # ── Manual retrain trigger (key only) ─────────────────────────────
+    st.markdown("##### ⚡ Manual Retrain Trigger (no file upload)")
     r1, r2 = st.columns([2, 3])
     with r1:
-        reason = st.selectbox("Reason", ["manual", "drift_detected", "performance_degradation", "scheduled"])
+        reason = st.selectbox(
+            "Reason",
+            ["manual", "drift_detected", "performance_degradation", "scheduled"],
+            key="manual_reason",
+        )
     with r2:
-        api_key = st.text_input("API key", type="password")
-    if st.button("🔁 Trigger retrain", type="primary", disabled=not api_key):
+        api_key = st.text_input("API key", type="password", key="manual_api_key")
+    if st.button("🔁 Trigger retrain", type="primary", disabled=not api_key, key="manual_trigger"):
         try:
             res = client.trigger_retrain(reason, api_key)
         except APIError as e:
@@ -169,7 +345,43 @@ with tab_retrain:
         else:
             st.success(f"✅ {res['message']}")
 
+    st.divider()
+
+    # ── Upload history ─────────────────────────────────────────────────
+    st.markdown("##### 📁 Upload History")
+    try:
+        history = client.list_uploads()
+        uploads = history.get("uploads", [])
+        if not uploads:
+            st.info("No CSV files uploaded yet.")
+        else:
+            import datetime
+            hist_rows = []
+            for u in uploads:
+                ts = datetime.datetime.fromtimestamp(u["uploaded_at"]).strftime("%Y-%m-%d %H:%M:%S")
+                hist_rows.append({
+                    "Filename": u["filename"],
+                    "Rows": f"{u['rows']:,}" if u.get("rows") is not None else "—",
+                    "Size": f"{u['size_bytes'] / 1024:.1f} KB",
+                    "Uploaded At": ts,
+                })
+            st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+    except APIError:
+        st.warning("Could not fetch upload history — is the API running?")
+
     st.markdown("---")
     st.markdown("#### Live dashboards")
-    st.link_button("📊 Open Grafana", cfg.grafana_url, use_container_width=True)
-    st.link_button("🔢 Open Prometheus", cfg.prometheus_url, use_container_width=True)
+    from frontend.common import _is_reachable
+    mon_col1, mon_col2 = st.columns(2)
+    with mon_col1:
+        if _is_reachable(cfg.grafana_url):
+            st.link_button("📊 Open Grafana", cfg.grafana_url, use_container_width=True)
+        else:
+            st.button("📊 Grafana — offline", disabled=True, use_container_width=True,
+                      help=f"{cfg.grafana_url} not reachable. Use Docker Compose to start Grafana.")
+    with mon_col2:
+        if _is_reachable(cfg.prometheus_url):
+            st.link_button("🔢 Open Prometheus", cfg.prometheus_url, use_container_width=True)
+        else:
+            st.button("🔢 Prometheus — offline", disabled=True, use_container_width=True,
+                      help=f"{cfg.prometheus_url} not reachable. Use Docker Compose to start Prometheus.")

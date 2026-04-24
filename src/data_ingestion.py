@@ -23,6 +23,9 @@ from src.utils import setup_logger, load_config, get_project_root, ensure_dir
 
 logger = setup_logger(__name__)
 
+# Resolved once at import time; Airflow/API containers both set this env var.
+UPLOADS_DIR = os.environ.get("UPLOADS_DIR", "data/feedback/uploads")
+
 # ---------------------------------------------------------------------------
 # Schema
 # ---------------------------------------------------------------------------
@@ -34,9 +37,32 @@ EXPECTED_SCHEMA = {
     "TWF": "int", "HDF": "int", "PWF": "int", "OSF": "int", "RNF": "int",
 }
 
+# These are optional — uploaded files often won't have them (they get dropped anyway)
+_OPTIONAL_COLS = {"UDI", "Product ID", "TWF", "HDF", "PWF", "OSF", "RNF"}
+
 # Columns removed to prevent label leakage and identifier noise
 LEAKY_FAILURE_MODE_COLS = ["TWF", "HDF", "PWF", "OSF", "RNF"]
 IDENTIFIER_COLS = ["UDI", "Product ID"]
+
+
+def get_latest_upload(uploads_dir: str | None = None) -> str | None:
+    """
+    Return the path to the most-recently modified CSV in the uploads directory,
+    or None if no uploads exist yet.
+
+    This is the hook that makes retrain-with-upload work: data_ingestion
+    checks here first, so the entire downstream pipeline (preprocess → train)
+    automatically operates on the new data.
+    """
+    dir_path = Path(uploads_dir or UPLOADS_DIR)
+    if not dir_path.exists():
+        return None
+    files = list(dir_path.glob("*.csv"))
+    if not files:
+        return None
+    latest = max(files, key=lambda f: f.stat().st_mtime)
+    logger.info(f"[UPLOAD] Latest uploaded dataset: {latest}")
+    return str(latest)
 
 
 def load_raw_data(filepath: str) -> pd.DataFrame:
@@ -53,10 +79,24 @@ def load_raw_data(filepath: str) -> pd.DataFrame:
 
 
 def validate_schema(df: pd.DataFrame) -> bool:
-    """Validate that the DataFrame contains all expected columns."""
-    missing = set(EXPECTED_SCHEMA.keys()) - set(df.columns)
+    """
+    Validate required columns.
+
+    Core columns (Type, temperatures, RPM, torque, tool wear, Machine failure)
+    are always required.  Optional columns (UDI, Product ID, TWF/HDF/PWF/OSF/RNF)
+    are allowed to be absent — they are dropped before training anyway, so
+    user-uploaded files that omit them will still pass validation.
+    """
+    all_expected = set(EXPECTED_SCHEMA.keys())
+    missing = all_expected - set(df.columns)
+    critical_missing = missing - _OPTIONAL_COLS
+    if critical_missing:
+        raise ValueError(
+            f"Missing required columns: {sorted(critical_missing)}. "
+            f"Optional columns that may be absent: {sorted(_OPTIONAL_COLS)}"
+        )
     if missing:
-        raise ValueError(f"Missing required columns: {missing}")
+        logger.info(f"Optional columns absent (will be skipped): {sorted(missing)}")
     logger.info("Schema validation passed")
     return True
 
@@ -126,14 +166,32 @@ def split_data(df: pd.DataFrame, test_size: float = 0.2,
 
 
 def run_ingestion(config: dict | None = None) -> dict:
-    """Execute the full ingestion pipeline."""
+    """Execute the full ingestion pipeline.
+
+    Data source priority:
+      1. Latest CSV in UPLOADS_DIR  (set by API when user uploads a file)
+      2. Default raw path from config  (data/raw/ai4i2020.csv)
+
+    The chosen path is stored in the return dict as ``data_source`` so the
+    Airflow DAG can surface it in XCom and logs.
+    """
     if config is None:
         config = load_config()
 
     root = get_project_root()
-    raw_path = str(root / config["data"]["raw_path"])
     processed_dir = str(root / config["data"]["processed_dir"])
     ensure_dir(processed_dir)
+
+    # ── Data source selection ──────────────────────────────────────────
+    uploaded = get_latest_upload()
+    if uploaded:
+        raw_path = uploaded
+        data_source = "uploaded"
+        logger.info(f"[UPLOAD] Using uploaded dataset for ingestion: {raw_path}")
+    else:
+        raw_path = str(root / config["data"]["raw_path"])
+        data_source = "default"
+        logger.info(f"[DEFAULT] No uploads found — using default dataset: {raw_path}")
 
     df = load_raw_data(raw_path)
     validate_schema(df)
@@ -155,6 +213,8 @@ def run_ingestion(config: dict | None = None) -> dict:
 
     return {
         "status": "success",
+        "data_source": data_source,
+        "raw_path": raw_path,
         "train_path": train_path,
         "test_path": test_path,
         "train_rows": len(train_df),

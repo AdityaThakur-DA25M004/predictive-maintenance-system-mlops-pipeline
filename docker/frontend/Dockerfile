@@ -2,6 +2,8 @@
 # ============================================================
 # Streamlit Frontend — Predictive Maintenance
 # ============================================================
+# ALWAYS runs on port 8501 inside the container.
+# docker-compose maps FRONTEND_PORT (e.g. 3000) → 8501.
 
 FROM python:3.11-slim AS runtime
 
@@ -33,4 +35,5 @@ EXPOSE 8501
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD curl -fsS http://localhost:8501/_stcore/health || exit 1
 
-CMD ["sh", "-c", "streamlit run frontend/app.py --server.port=${FRONTEND_PORT:-8501} --server.address=0.0.0.0"]
+# ALWAYS use 8501 — never use FRONTEND_PORT inside the container
+CMD ["streamlit", "run", "frontend/app.py", "--server.port=8501", "--server.address=0.0.0.0"]

@@ -1,44 +1,60 @@
-# Core ML
-pandas==2.1.4
-numpy==1.26.2
-scikit-learn==1.3.2
-scipy==1.11.4
-joblib==1.3.2
-imbalanced-learn==0.11.0
+# ============================================================
+# Predictive Maintenance System — Python Dependencies
+# ============================================================
+# Python 3.11 | Windows / Linux
+#
+# INSTALL:
+#   python -m venv venv
+#   .\venv\Scripts\activate          # Windows
+#   pip install --upgrade pip setuptools wheel
+#   pip install -r requirements.txt
+# ============================================================
 
-# API
-fastapi==0.104.1
-uvicorn==0.24.0
-pydantic==2.5.2
-pydantic-settings==2.1.0
-python-multipart==0.0.6
+# ── Core ML ──────────────────────────────────────────────────
+numpy>=1.26.0,<2.0
+pandas>=2.1.0,<3.0
+scikit-learn>=1.3.0,<2.0
+scipy>=1.11.0,<2.0
+joblib>=1.3.0,<2.0
+imbalanced-learn>=0.11.0,<1.0
 
-# MLflow
-mlflow==2.9.2
+# ── API Layer ────────────────────────────────────────────────
+fastapi>=0.104.0,<1.0
+uvicorn[standard]>=0.24.0,<1.0
+pydantic>=2.5.0,<3.0
+pydantic-settings>=2.1.0,<3.0
+python-multipart>=0.0.6,<1.0
+httpx>=0.25.0,<1.0
 
-# Monitoring
-prometheus-client==0.19.0
-prometheus-fastapi-instrumentator==6.1.0
+# ── Experiment Tracking ──────────────────────────────────────
+mlflow>=2.9.0,<3.0
 
-# Orchestration — runs inside Docker only, NOT installed on host Windows
-# apache-airflow==2.8.0
+# ── Monitoring ───────────────────────────────────────────────
+prometheus-client>=0.19.0,<1.0
 
-# Frontend
-streamlit==1.29.0
-plotly==5.18.0
-requests==2.31.0
+# ── Frontend ─────────────────────────────────────────────────
+streamlit>=1.29.0,<2.0
+plotly>=5.18.0,<6.0
+requests>=2.31.0,<3.0
 
-# Data versioning
-dvc==3.30.1
-dvc-http==2.32.0
-dagshub==0.3.45
+# ── Data & Model Versioning ─────────────────────────────────
+# dvc[all] includes: S3, GDrive, GCS, Azure, SSH, HDFS, WebDAV
+# No need to install dvc-s3, dvc-gdrive etc. separately
+dvc[all]>=3.55.0,<4.0
+# Pin these to fix known Windows errors:
+#   "cannot import name '_DIR_MARK'"   → pathspec too old
+#   "'Repo' object has no attribute 'stage'" → scmrepo too old
+pathspec>=0.12.1
+scmrepo>=3.3.0
+gitpython>=3.1.40
 
-# Config
-pyyaml==6.0.1
+# ── Configuration ────────────────────────────────────────────
+pyyaml>=6.0.1,<7.0
+python-dotenv>=1.0.0,<2.0
 
-# Testing
-pytest==7.4.3
-httpx==0.25.2
+# ── Testing ──────────────────────────────────────────────────
+pytest>=7.4.0,<9.0
+pytest-cov>=4.1.0,<6.0
 
-# Utilities
-python-dotenv==1.0.0
+# NOTE: Apache Airflow is NOT installed locally.
+# It runs inside Docker only (see docker/airflow/Dockerfile).

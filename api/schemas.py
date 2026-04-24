@@ -12,13 +12,16 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 class SensorInput(BaseModel):
     """Single sensor reading for prediction."""
-    model_config = ConfigDict(json_schema_extra={
-        "example": {
-            "air_temperature": 300.0, "process_temperature": 310.0,
-            "rotational_speed": 1500, "torque": 40.0,
-            "tool_wear": 100, "product_type": "L",
-        }
-    })
+    model_config = ConfigDict(
+        protected_namespaces=(),    # Fix: prevent 'model_' namespace conflict
+        json_schema_extra={
+            "example": {
+                "air_temperature": 300.0, "process_temperature": 310.0,
+                "rotational_speed": 1500, "torque": 40.0,
+                "tool_wear": 100, "product_type": "L",
+            }
+        },
+    )
 
     air_temperature: float = Field(..., description="Air temperature in Kelvin", ge=250, le=350)
     process_temperature: float = Field(..., description="Process temperature in Kelvin", ge=250, le=400)
@@ -29,6 +32,8 @@ class SensorInput(BaseModel):
 
 
 class PredictionResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     prediction: int = Field(..., description="0 = No failure, 1 = Failure")
     failure_probability: float = Field(..., description="Probability of failure", ge=0, le=1)
     risk_level: str = Field(..., description="LOW / MEDIUM / HIGH / CRITICAL")
@@ -36,6 +41,10 @@ class PredictionResponse(BaseModel):
     prediction_id: Optional[int] = Field(
         default=None,
         description="Unique prediction ID — use with POST /feedback to submit ground truth.",
+    )
+    inference_time_ms: Optional[float] = Field(
+        default=None,
+        description="Pure model inference time in milliseconds (excludes API/network overhead)",
     )
 
 
@@ -56,6 +65,8 @@ class BatchResponse(BaseModel):
 # System
 # ---------------------------------------------------------------------------
 class HealthResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     status: str
     model_loaded: bool
     scaler_loaded: bool
@@ -86,10 +97,10 @@ class RetrainResponse(BaseModel):
 # Feedback loop (ground-truth)
 # ---------------------------------------------------------------------------
 class FeedbackInput(BaseModel):
-    """Submit the ground-truth label for a previous prediction."""
-    model_config = ConfigDict(json_schema_extra={
-        "example": {"prediction_id": 42, "actual_label": 1}
-    })
+    model_config = ConfigDict(
+        protected_namespaces=(),
+        json_schema_extra={"example": {"prediction_id": 42, "actual_label": 1}},
+    )
     prediction_id: int = Field(..., description="ID returned by POST /predict", gt=0)
     actual_label: int = Field(..., description="Observed label: 0=no failure, 1=failure", ge=0, le=1)
 
@@ -106,3 +117,55 @@ class FeedbackStats(BaseModel):
     overall_accuracy: Optional[float] = None
     rolling_accuracy: Optional[float] = None
     window: int
+
+
+# ---------------------------------------------------------------------------
+# Upload & Retrain
+# ---------------------------------------------------------------------------
+class UploadRetrainResponse(BaseModel):
+    status: str
+    filename: str
+    rows: int
+    columns: list[str]
+    message: str
+    triggered_by: Optional[str] = None
+    save_path: Optional[str] = None
+
+
+class UploadedFile(BaseModel):
+    filename: str
+    size_bytes: int
+    uploaded_at: float
+    rows: Optional[int] = None
+
+
+class UploadListResponse(BaseModel):
+    uploads: list[UploadedFile]
+
+
+# ---------------------------------------------------------------------------
+# Rollback
+# ---------------------------------------------------------------------------
+class RollbackRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    target_version: Optional[str] = Field(
+        default=None,
+        description=(
+            "MLflow model version to roll back to. "
+            "If None, the API reloads the most recent local best_model.joblib "
+            "and its companion scaler + metrics."
+        ),
+    )
+    reason: str = Field(
+        default="manual_rollback",
+        description="Why rollback is being performed (logged to Prometheus).",
+    )
+
+
+class RollbackResponse(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    status: str
+    previous_version: str
+    target_version: str
+    model_loaded: bool
+    message: str

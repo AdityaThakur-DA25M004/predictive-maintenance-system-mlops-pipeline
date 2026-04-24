@@ -1,7 +1,10 @@
 """
 Pipeline Visualization Page — End-to-end ML pipeline overview.
 """
+import sys
+import os
 
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import plotly.graph_objects as go
 import streamlit as st
 from frontend.common import get_config, render_header, render_sidebar, setup_page
@@ -61,36 +64,52 @@ st.markdown("### Stage Details")
 stages = [
     ("📥", "Data Ingestion", "Load raw CSV, validate schema, drop leaky columns "
      "(TWF/HDF/PWF/OSF/RNF/UDI/Product ID), stratified 80/20 split.",
-     "src/data_ingestion.py", "train.csv, test.csv"),
+     "src/data_ingestion.py", "train.csv, test.csv", "5–10 s"),
     ("🔧", "Feature Engineering", "Derive temp_diff, power, wear_degree, speed_torque_ratio, "
      "type_encoded. Fit StandardScaler on train only.",
-     "src/data_preprocessing.py", "scaler.joblib, drift_baselines.json"),
-    ("🧠", "Model Training", "RandomForest grid search. Every run logged to MLflow "
+     "src/data_preprocessing.py", "scaler.joblib, drift_baselines.json", "10–20 s"),
+    ("🧠", "Model Training", "RandomForest grid search (8 combos). Every run logged to MLflow "
      "(params, metrics, feature importance, model artifact).",
-     "src/model_training.py", "best_model.joblib, test_metrics.json"),
+     "src/model_training.py", "best_model.joblib, test_metrics.json", "60–180 s ⚠️ bottleneck"),
     ("📊", "Evaluation", "Evaluate on hold-out test set. Best model registered "
      "in MLflow Model Registry.",
-     "MLflow Registry", "Registered model version"),
+     "MLflow Registry", "Registered model version", "3–8 s"),
     ("🚀", "Deployment", "FastAPI in Docker. Predictions logged to SQLite for "
      "ground-truth feedback matching.",
-     "api/main.py", "/predict, /feedback endpoints"),
+     "api/main.py", "/predict, /feedback endpoints", "< 1 s (restart)"),
     ("📡", "Monitoring & Drift", "Prometheus scrapes /metrics. Drift via KS-test + PSI. "
      "Alerts on error rate >5%, p95 >200ms, or drift.",
-     "Prometheus + Grafana", "Alerts, dashboards, drift reports"),
+     "Prometheus + Grafana", "Alerts, dashboards, drift reports", "5–10 s"),
     ("🔁", "Retrain Trigger", "When drift detected or feedback accuracy degrades, "
-     "authenticated /retrain endpoint triggers the Airflow DAG.",
-     "airflow/dags/ml_pipeline_dag.py", "New model version"),
+     "authenticated /retrain endpoint triggers the Airflow DAG. "
+     "Upload new CSV directly from the Monitoring page.",
+     "airflow/dags/ml_pipeline_dag.py", "New model version", "~2–4 min (full pipeline)"),
 ]
-for i, (icon, name, desc, module, outputs) in enumerate(stages):
+for i, (icon, name, desc, module, outputs, est_time) in enumerate(stages):
     with st.expander(f"{icon} Stage {i+1}: {name}", expanded=i == 0):
         st.markdown(f"**What it does.** {desc}")
         st.markdown(f"**Module.** `{module}`")
         st.markdown(f"**Outputs.** `{outputs}`")
+        st.markdown(f"**Estimated time.** `{est_time}`")
 
 st.markdown("---")
 st.markdown("### Open external tools")
-e1, e2, e3, e4 = st.columns(4)
-with e1: st.link_button("🔬 MLflow", cfg.mlflow_url, use_container_width=True)
-with e2: st.link_button("🌀 Airflow", cfg.airflow_url, use_container_width=True)
-with e3: st.link_button("📊 Grafana", cfg.grafana_url, use_container_width=True)
-with e4: st.link_button("🔢 Prometheus", cfg.prometheus_url, use_container_width=True)
+from frontend.common import _is_reachable
+tools_pipeline = [
+    ("🔬 MLflow",     cfg.mlflow_url),
+    ("🌀 Airflow",    cfg.airflow_url),
+    ("📊 Grafana",    cfg.grafana_url),
+    ("🔢 Prometheus", cfg.prometheus_url),
+]
+cols = st.columns(len(tools_pipeline))
+for col, (label, url) in zip(cols, tools_pipeline):
+    with col:
+        if _is_reachable(url):
+            st.link_button(label, url, use_container_width=True)
+        else:
+            st.button(
+                f"{label} — offline",
+                disabled=True,
+                use_container_width=True,
+                help=f"{url} is not reachable. Start the service or use Docker Compose.",
+            )

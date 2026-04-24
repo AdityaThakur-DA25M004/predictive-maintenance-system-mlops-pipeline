@@ -134,3 +134,57 @@ groups:
         annotations:
           summary: "Rolling feedback accuracy below 70%"
           description: "Live model accuracy from feedback is {{ $value | humanizePercentage }}."
+
+  - name: retraining_activity
+    interval: 1m
+    rules:
+      - alert: RetrainStorm
+        # Guard against runaway automation triggering too many retrains
+        expr: sum(increase(retrain_triggers_total[15m])) > 5
+        for: 0m
+        labels:
+          severity: warning
+          component: pipeline
+        annotations:
+          summary: "Excessive retraining triggers (>5 in 15 min)"
+          description: "{{ $value }} retrain triggers in the last 15 minutes — check automation."
+
+      - alert: ModelStale
+        # No training run in the past 7 days
+        expr: (time() - last_training_timestamp_seconds) > 604800
+        for: 5m
+        labels:
+          severity: warning
+          component: model
+        annotations:
+          summary: "Model has not been retrained in 7+ days"
+          description: >
+            Last training was {{ $value | humanizeDuration }} ago.
+            Consider triggering a fresh run to incorporate new data.
+
+      - alert: UploadSuccessRate
+        # Catch systematic upload failures (>50% fail rate over 10 min)
+        expr: |
+          sum(rate(dataset_uploads_total{status="failed"}[10m]))
+          /
+          clamp_min(sum(rate(dataset_uploads_total[10m])), 0.0001)
+          > 0.5
+        for: 2m
+        labels:
+          severity: warning
+          component: pipeline
+        annotations:
+          summary: "Dataset upload failure rate > 50%"
+          description: "More than half of CSV uploads are being rejected — check data schema."
+
+      - alert: TrainingDataSourceDefault
+        # Fires when the last retrain used the default dataset
+        # (i.e. uploaded file was ignored or not present)
+        expr: retrain_data_source == 0 and sum(retrain_triggers_total) > 0
+        for: 30m
+        labels:
+          severity: info
+          component: pipeline
+        annotations:
+          summary: "Retraining is using default dataset (no upload detected)"
+          description: "Upload a new CSV via /retrain/upload to train on fresh data."
