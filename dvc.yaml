@@ -35,7 +35,6 @@ stages:
       - configs/config.yaml
     outs:
       - models/best_model.joblib
-      - models/test_metrics.json
       - models/classification_report.json
     metrics:
       - models/test_metrics.json:

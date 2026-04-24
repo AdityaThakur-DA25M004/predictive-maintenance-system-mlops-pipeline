@@ -1,0 +1,110 @@
+schema: '2.0'
+stages:
+  data_ingestion:
+    cmd: python -m src.data_ingestion
+    deps:
+    - path: configs/config.yaml
+      hash: md5
+      md5: e0a797b62e5769c1b3c2ff4a7bfa9b62
+      size: 1285
+    - path: data/raw/ai4i2020.csv
+      hash: md5
+      md5: f0adaa9c5e25366c6df1cc2684479871
+      size: 522048
+    - path: src/data_ingestion.py
+      hash: md5
+      md5: f956c7b352c376239a14e666306de435
+      size: 8944
+    - path: src/utils.py
+      hash: md5
+      md5: a6f4700e19628b777f60face0508ba69
+      size: 3151
+    outs:
+    - path: data/processed/test.csv
+      hash: md5
+      md5: 9608b2ca73c3c6a3d4b54b669f8a215b
+      size: 61114
+    - path: data/processed/train.csv
+      hash: md5
+      md5: 24a374bac1423ba23f8bef59a11dea5d
+      size: 243989
+  preprocessing:
+    cmd: python -m src.data_preprocessing
+    deps:
+    - path: configs/config.yaml
+      hash: md5
+      md5: e0a797b62e5769c1b3c2ff4a7bfa9b62
+      size: 1285
+    - path: data/processed/test.csv
+      hash: md5
+      md5: 9608b2ca73c3c6a3d4b54b669f8a215b
+      size: 61114
+    - path: data/processed/train.csv
+      hash: md5
+      md5: 24a374bac1423ba23f8bef59a11dea5d
+      size: 243989
+    - path: src/data_preprocessing.py
+      hash: md5
+      md5: 70d588505ad5850345430b029e936d87
+      size: 7690
+    - path: src/utils.py
+      hash: md5
+      md5: a6f4700e19628b777f60face0508ba69
+      size: 3151
+    outs:
+    - path: data/baselines/drift_baselines.json
+      hash: md5
+      md5: e4d3805b748f5aba2d8d220325813bfd
+      size: 2972
+    - path: data/processed/test_processed.csv
+      hash: md5
+      md5: 847bc36b44451cbd377d1d1e66b20e14
+      size: 404278
+    - path: data/processed/train_processed.csv
+      hash: md5
+      md5: e3d99a8a3716f48e9ee48401d0cfd76e
+      size: 1616090
+    - path: models/scaler.joblib
+      hash: md5
+      md5: 0528950711fa60ef811d873facc71276
+      size: 1239
+  training:
+    cmd: python -m src.model_training
+    deps:
+    - path: configs/config.yaml
+      hash: md5
+      md5: e0a797b62e5769c1b3c2ff4a7bfa9b62
+      size: 1285
+    - path: data/processed/test_processed.csv
+      hash: md5
+      md5: 847bc36b44451cbd377d1d1e66b20e14
+      size: 404278
+    - path: data/processed/train_processed.csv
+      hash: md5
+      md5: e3d99a8a3716f48e9ee48401d0cfd76e
+      size: 1616090
+    - path: src/data_preprocessing.py
+      hash: md5
+      md5: 70d588505ad5850345430b029e936d87
+      size: 7690
+    - path: src/model_training.py
+      hash: md5
+      md5: 290b7859133585b6d31900d41fc831ab
+      size: 15000
+    - path: src/utils.py
+      hash: md5
+      md5: a6f4700e19628b777f60face0508ba69
+      size: 3151
+    outs:
+    - path: models/best_model.joblib
+      hash: md5
+      md5: fc417f9686ba2b6492c9c478b9f7444b
+      size: 1756425
+    - path: models/classification_report.json
+      hash: md5
+      md5: 2ab00d6e62584ef8204c30f2e95ebe35
+      size: 614
+    - path: models/test_metrics.json
+      hash: md5
+      md5: 5ae1f5512f175cf2e4307f846d101b97
+      size: 254
