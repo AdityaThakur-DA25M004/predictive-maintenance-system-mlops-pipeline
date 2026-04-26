@@ -1,4 +1,4 @@
-[core]
-    remote = origin
-[remote "origin"]
-    url = ./dvc_storage
+﻿[core]
+    remote = dagshub
+['remote "dagshub"']
+    url = s3://dvc
