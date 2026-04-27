@@ -82,6 +82,7 @@ class DriftReport(BaseModel):
     total_features_checked: int
     drifted_features: list[str]
     features: dict
+    reference_type: str = "unknown" 
 
 
 # ---------------------------------------------------------------------------

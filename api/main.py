@@ -16,12 +16,16 @@ import io
 import time
 import sqlite3
 import secrets
+import base64
+import uuid
+import hashlib
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
 import pandas as pd
 import joblib
+import requests
 
 from fastapi import FastAPI, HTTPException, Depends, Header, status, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -73,13 +77,66 @@ UPLOADS_DIR = os.environ.get(
 )
 
 # ---------------------------------------------------------------------------
+# Airflow REST API config (used by /retrain to actually start the DAG run
+# instead of only emitting an alert + Prometheus counter)
+# ---------------------------------------------------------------------------
+AIRFLOW_API_URL = os.environ.get("AIRFLOW_API_URL", "http://airflow-webserver:8080")
+AIRFLOW_USERNAME = os.environ.get("AIRFLOW_USERNAME", "")
+AIRFLOW_PASSWORD = os.environ.get("AIRFLOW_PASSWORD", "")
+AIRFLOW_DAG_ID = os.environ.get("AIRFLOW_DAG_ID", "predictive_maintenance_pipeline")
+
+# ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
 _state = {
     "model": None, "scaler": None, "baselines": None,
+    "ref_samples": None, "baselines_loaded_at": None,
     "start_time": None, "model_version": "unknown",
     "model_source": "unloaded", "prediction_buffer": [],
+    # Track recent upload content hashes so duplicate uploads of the same CSV
+    # don't re-fire the retrain email. Keyed by md5 of CSV bytes, value is
+    # unix timestamp of when we last alerted for that content.
+    "recent_upload_alerts": {},
+    # Track last-sent timestamp per `reason` for the manual /retrain endpoint
+    # so accidental double-clicks don't double-email.
+    "last_manual_retrain_alert": {},
 }
+
+# How long to suppress duplicate retrain alerts for the same uploaded CSV.
+# 1 hour absorbs accidental re-uploads (double-click, browser retry, user
+# verifying the file landed). Long-tail re-uploads after this window are
+# presumed intentional and DO get a fresh alert.
+RECENT_UPLOAD_TTL = 3600  # seconds
+
+# Manual /retrain throttle: don't email twice for the same reason within this
+# window. Different reasons reset the timer (so "manual" → "drift_detected"
+# would still send both alerts).
+RETRAIN_ALERT_THROTTLE_SECONDS = 300  # 5 minutes
+
+
+def _is_duplicate_upload(csv_bytes: bytes) -> bool:
+    """
+    Return True if this exact CSV content was uploaded within the last
+    RECENT_UPLOAD_TTL seconds. Used to suppress duplicate retrain emails.
+
+    Side effects:
+      - Garbage-collects entries older than the TTL
+      - Records the current upload's hash with the current timestamp
+    """
+    digest = hashlib.md5(csv_bytes).hexdigest()
+    now = time.time()
+    recent = _state["recent_upload_alerts"]
+
+    # GC old entries so the dict doesn't grow unbounded
+    expired = [h for h, ts in recent.items() if now - ts > RECENT_UPLOAD_TTL]
+    for h in expired:
+        del recent[h]
+
+    if digest in recent:
+        return True  # Duplicate within TTL
+
+    recent[digest] = now
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +221,23 @@ def _load_artifacts() -> None:
     baselines_path = data_dir / "drift_baselines.json"
     if baselines_path.exists():
         _state["baselines"] = load_json(str(baselines_path))
+        _state["baselines_loaded_at"] = baselines_path.stat().st_mtime
         logger.info(f"Baselines loaded from {baselines_path}")
+
+    # Reference samples for drift KS / PSI tests (real, not synthetic Gaussian)
+    ref_samples_path = data_dir / "ref_samples.json"
+    if ref_samples_path.exists():
+        try:
+            _state["ref_samples"] = load_json(str(ref_samples_path))
+            logger.info(f"Reference samples loaded from {ref_samples_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load ref_samples ({ref_samples_path}): {e}")
+            _state["ref_samples"] = None
+    else:
+        logger.info(
+            f"No ref_samples.json at {ref_samples_path} — drift will fall back "
+            "to synthetic Gaussian until preprocessing pipeline runs"
+        )
 
     metrics_path = models_dir / "test_metrics.json"
     if metrics_path.exists():
@@ -234,6 +307,57 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _trigger_airflow_dag(reason: str = "manual") -> dict:
+    """
+    Start a DagRun for the predictive_maintenance_pipeline via Airflow's
+    stable REST API. Returns a dict with the trigger result.
+
+    Without this, the /retrain endpoint only increments a Prometheus counter
+    and sends an alert — no training actually happens until someone opens
+    the Airflow UI manually. Calling this from the API closes the loop:
+    click in Streamlit → DAG actually runs → metrics update.
+
+    Non-fatal: if Airflow is unreachable or returns an error, we log and
+    return status=skipped/failed but don't 500 the API request — the alert
+    + Prometheus counter still fired upstream.
+    """
+    if not (AIRFLOW_USERNAME and AIRFLOW_PASSWORD):
+        logger.warning(
+            "AIRFLOW_USERNAME / AIRFLOW_PASSWORD not set — DAG trigger skipped"
+        )
+        return {"status": "skipped", "detail": "airflow_credentials_not_set"}
+
+    auth_str = f"{AIRFLOW_USERNAME}:{AIRFLOW_PASSWORD}".encode("utf-8")
+    headers = {
+        "Authorization": "Basic " + base64.b64encode(auth_str).decode("ascii"),
+        "Content-Type": "application/json",
+    }
+    # Unique dag_run_id per trigger so two clicks in the same minute don't collide
+    dag_run_id = f"api_{reason}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+    payload = {
+        "dag_run_id": dag_run_id,
+        "conf": {"triggered_by": "api", "reason": reason},
+    }
+    url = f"{AIRFLOW_API_URL}/api/v1/dags/{AIRFLOW_DAG_ID}/dagRuns"
+
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        if r.status_code in (200, 201):
+            logger.info(f"Airflow DAG triggered: {dag_run_id}")
+            return {"status": "triggered", "dag_run_id": dag_run_id}
+        logger.warning(
+            f"Airflow DAG trigger returned {r.status_code}: {r.text[:200]}"
+        )
+        return {
+            "status": "failed",
+            "http_status": r.status_code,
+            "detail": r.text[:200],
+        }
+    except Exception as e:
+        logger.warning(f"Airflow DAG trigger failed (non-fatal): {e}")
+        return {"status": "failed", "detail": str(e)}
+
+
 def _build_features(reading: SensorInput) -> pd.DataFrame:
     raw = pd.DataFrame([{
         "Air temperature [K]": reading.air_temperature,
@@ -498,7 +622,15 @@ async def check_drift(batch: BatchInput):
 
     df = engineer_features(pd.DataFrame(rows))
     feature_cols = get_feature_columns()
-    report = detect_drift(df, _state["baselines"], feature_cols)
+    # Pass ref_samples (real training samples) so KS test isn't comparing
+    # against a synthetic Gaussian. baselines_path is a fallback so detect_drift
+    # can auto-discover ref_samples.json on disk if _state was never populated.
+    data_dir = PROJECT_ROOT / "data" / "baselines"
+    report = detect_drift(
+        df, _state["baselines"], feature_cols,
+        ref_samples=_state.get("ref_samples"),
+        baselines_path=str(data_dir / "drift_baselines.json"),
+    )
 
     DRIFT_DETECTED.set(1 if report["overall_drift"] else 0)
     DRIFT_FEATURES_COUNT.set(report["n_drifted"])
@@ -515,6 +647,156 @@ async def check_drift(batch: BatchInput):
 
 
 # ---------------------------------------------------------------------------
+# Admin: reload baselines + ref_samples from disk (called by Airflow DAG
+# at the end of preprocessing so the live API picks up new files without
+# a container restart).
+# ---------------------------------------------------------------------------
+@app.post(
+    "/admin/reload-baselines", tags=["Maintenance"],
+    dependencies=[Depends(require_api_key)],
+)
+async def reload_baselines():
+    """
+    Reload `drift_baselines.json` and `ref_samples.json` from disk into
+    process memory. Intended to be called by the Airflow DAG after the
+    preprocessing task rewrites these files; without this, the API keeps
+    using stale in-memory baselines until the container is restarted.
+    """
+    data_dir = PROJECT_ROOT / "data" / "baselines"
+    baselines_path = data_dir / "drift_baselines.json"
+    ref_samples_path = data_dir / "ref_samples.json"
+
+    if not baselines_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"baselines file not found at {baselines_path}",
+        )
+
+    try:
+        _state["baselines"] = load_json(str(baselines_path))
+        _state["baselines_loaded_at"] = baselines_path.stat().st_mtime
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"baselines reload failed: {e}")
+
+    ref_loaded = False
+    if ref_samples_path.exists():
+        try:
+            _state["ref_samples"] = load_json(str(ref_samples_path))
+            ref_loaded = True
+        except Exception as e:
+            logger.warning(f"ref_samples reload failed (non-fatal): {e}")
+            _state["ref_samples"] = None
+    else:
+        _state["ref_samples"] = None
+
+    logger.info(
+        f"Reloaded baselines ({len(_state['baselines'])} features) | "
+        f"ref_samples={'yes' if ref_loaded else 'no'}"
+    )
+    return {
+        "status": "reloaded",
+        "baselines_features": len(_state["baselines"]),
+        "ref_samples_loaded": ref_loaded,
+        "baselines_mtime": _state["baselines_loaded_at"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Admin: reload model + training metrics from disk (called by Airflow DAG
+# at the end of training so Prometheus / Grafana see the new f1/accuracy/
+# version / last-training-timestamp without a container restart).
+# ---------------------------------------------------------------------------
+@app.post(
+    "/admin/reload-model", tags=["Maintenance"],
+    dependencies=[Depends(require_api_key)],
+)
+async def reload_model(data_source: str = "unknown"):
+    """
+    Reload `best_model.joblib`, `scaler.joblib`, and `test_metrics.json`
+    from disk and refresh the corresponding Prometheus gauges:
+      - model_accuracy
+      - model_f1_score
+      - last_training_timestamp_seconds
+      - model_version_numeric
+      - retrain_data_source  (1 = uploaded CSV, 0 = default)
+
+    Without this, Grafana panels for "Model F1 Score", "Model Accuracy",
+    "Time Since Last Training", etc. show stale values because the API
+    only loaded these at startup.
+
+    `data_source` query param: "uploaded" | "default" | "unknown".
+    Sent by the Airflow DAG so retrain_data_source reflects the truth
+    of what the training task actually used.
+    """
+    models_dir = PROJECT_ROOT / "models"
+    model_path = models_dir / "best_model.joblib"
+    scaler_path = models_dir / "scaler.joblib"
+    metrics_path = models_dir / "test_metrics.json"
+
+    if not model_path.exists():
+        raise HTTPException(
+            status_code=404, detail=f"model file not found at {model_path}"
+        )
+
+    try:
+        _state["model"] = joblib.load(model_path)
+        _state["model_source"] = "local-joblib"
+        # Bump version on every reload so Grafana sees a step change
+        try:
+            current = float(_state.get("model_version", "0") or "0")
+        except (ValueError, TypeError):
+            current = 0.0
+        _state["model_version"] = f"{current + 0.1:.1f}"
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"model reload failed: {e}")
+
+    if scaler_path.exists():
+        try:
+            _state["scaler"] = joblib.load(scaler_path)
+        except Exception as e:
+            logger.warning(f"scaler reload failed (non-fatal): {e}")
+
+    metrics_loaded = False
+    if metrics_path.exists():
+        try:
+            metrics = load_json(str(metrics_path))
+            MODEL_ACCURACY.set(metrics.get("accuracy", 0))
+            MODEL_F1_SCORE.set(metrics.get("f1_score", 0))
+            MODEL_INFO.info({
+                "version": _state["model_version"],
+                "source": _state["model_source"],
+                "algorithm": "RandomForest",
+                "f1_score": str(metrics.get("f1_score", 0)),
+            })
+            LAST_TRAINING_TIMESTAMP.set(metrics_path.stat().st_mtime)
+            try:
+                MODEL_VERSION_NUMERIC.set(float(_state["model_version"]))
+            except (ValueError, TypeError):
+                MODEL_VERSION_NUMERIC.set(0)
+            metrics_loaded = True
+        except Exception as e:
+            logger.warning(f"metrics reload failed (non-fatal): {e}")
+
+    # Reflect the data source the DAG actually used in the gauge
+    if data_source == "uploaded":
+        RETRAIN_DATA_SOURCE.set(1)
+    elif data_source == "default":
+        RETRAIN_DATA_SOURCE.set(0)
+    # else: leave gauge as-is
+
+    logger.info(
+        f"Reloaded model (version={_state['model_version']}, "
+        f"data_source={data_source}, metrics={'yes' if metrics_loaded else 'no'})"
+    )
+    return {
+        "status": "reloaded",
+        "model_version": _state["model_version"],
+        "metrics_loaded": metrics_loaded,
+        "data_source": data_source,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Retrain (authenticated)
 # ---------------------------------------------------------------------------
 @app.post(
@@ -522,25 +804,71 @@ async def check_drift(batch: BatchInput):
     dependencies=[Depends(require_api_key)],
 )
 async def trigger_retrain(reason: str = "manual"):
-    """Trigger model retraining (requires X-API-Key header)."""
+    """
+    Trigger model retraining (requires X-API-Key header).
+
+    Steps:
+      1. Increment Prometheus retrain counter (visible in Grafana).
+      2. Send retrain alert (email + log).
+      3. Actually start the Airflow DAG via REST API so training runs
+         end-to-end without a human opening the Airflow UI.
+    """
     RETRAIN_TRIGGERS.labels(reason=reason).inc()
     logger.info(f"Retraining triggered — reason: {reason}")
 
-    try:
-        from src.alert_notifier import send_retrain_alert
-        send_retrain_alert(
-            reason=reason,
-            model_version=_state.get("model_version", "unknown"),
-            triggered_by="api",
-            data_source="uploaded" if Path(UPLOADS_DIR).exists() and
-                        list(Path(UPLOADS_DIR).glob("*.csv")) else "default",
+    # Detect data source for accurate alerts + Prometheus gauge
+    is_uploaded = (
+        Path(UPLOADS_DIR).exists()
+        and any(Path(UPLOADS_DIR).glob("*.csv"))
+    )
+    data_source = "uploaded" if is_uploaded else "default"
+
+    # Throttle: skip the email if we already sent one for the same reason
+    # within RETRAIN_ALERT_THROTTLE_SECONDS. Catches accidental double-clicks.
+    now = time.time()
+    last_sent_map = _state["last_manual_retrain_alert"]
+    last_ts = last_sent_map.get(reason, 0)
+    suppress_alert = (now - last_ts) < RETRAIN_ALERT_THROTTLE_SECONDS
+
+    if suppress_alert:
+        logger.info(
+            f"Retrain alert for reason='{reason}' was sent "
+            f"{int(now - last_ts)}s ago — suppressing duplicate email"
         )
-    except Exception as _ra:
-        logger.warning(f"Retrain alert failed (non-fatal): {_ra}")
+    else:
+        try:
+            from src.alert_notifier import send_retrain_alert
+            send_retrain_alert(
+                reason=reason,
+                model_version=_state.get("model_version", "unknown"),
+                triggered_by="api",
+                data_source=data_source,
+            )
+            last_sent_map[reason] = now
+        except Exception as _ra:
+            logger.warning(f"Retrain alert failed (non-fatal): {_ra}")
+
+    # Actually start the Airflow DAG so training runs without a human
+    # opening the Airflow UI. Result is reported back to the caller so
+    # the frontend can show whether training really kicked off.
+    airflow_result = _trigger_airflow_dag(reason=reason)
+    if airflow_result["status"] == "triggered":
+        message = (
+            f"Retraining pipeline started. "
+            f"Airflow DAG run: {airflow_result['dag_run_id']}. "
+            "Watch Airflow UI for progress."
+        )
+    else:
+        message = (
+            "Retrain alert + counter recorded, but Airflow DAG could NOT "
+            f"be started ({airflow_result['status']}: "
+            f"{airflow_result.get('detail', '')}). "
+            "Open Airflow UI to trigger manually."
+        )
 
     return RetrainResponse(
-        status="triggered",
-        message="Retraining pipeline has been triggered. Check Airflow UI for progress.",
+        status="triggered" if airflow_result["status"] == "triggered" else "partial",
+        message=message,
         triggered_by=reason,
     )
 
@@ -607,29 +935,53 @@ async def retrain_with_upload(
     RETRAIN_DATA_SOURCE.set(1)   # uploaded CSV will be picked by next training run
     logger.info(f"CSV uploaded and stored: {save_path} ({len(df)} rows) | reason={reason}")
 
-    try:
-        from src.alert_notifier import send_retrain_alert
-        send_retrain_alert(
-            reason=reason,
-            model_version=_state.get("model_version", "unknown"),
-            triggered_by="upload",
-            data_source="uploaded",
+    # Suppress the retrain email if this exact CSV content was uploaded within
+    # the TTL window. Counter still ticks, file is still saved, DAG still
+    # runs — only the duplicate "training has been triggered" email is skipped.
+    is_duplicate = _is_duplicate_upload(content)
+    if is_duplicate:
+        logger.info(
+            f"Duplicate CSV upload detected (same content within "
+            f"{RECENT_UPLOAD_TTL}s) — suppressing retrain alert email"
         )
-    except Exception as _ra:
-        logger.warning(f"Upload retrain alert failed (non-fatal): {_ra}")
+    else:
+        try:
+            from src.alert_notifier import send_retrain_alert
+            send_retrain_alert(
+                reason=reason,
+                model_version=_state.get("model_version", "unknown"),
+                triggered_by="upload",
+                data_source="uploaded",
+            )
+        except Exception as _ra:
+            logger.warning(f"Upload retrain alert failed (non-fatal): {_ra}")
+
+    # Actually start the Airflow DAG so training picks up the new CSV.
+    airflow_result = _trigger_airflow_dag(reason=reason)
+    dup_note = "Duplicate upload detected — alert suppressed. " if is_duplicate else ""
+    if airflow_result["status"] == "triggered":
+        msg = (
+            f"CSV validated and stored ({len(df)} rows). "
+            f"{dup_note}"
+            f"Airflow DAG started: {airflow_result['dag_run_id']}. "
+            "Training will use this upload as the data source."
+        )
+    else:
+        msg = (
+            f"CSV validated and stored ({len(df)} rows). "
+            f"{dup_note}"
+            "Training will automatically use this file on the next pipeline run "
+            f"(Airflow auto-trigger {airflow_result['status']}: "
+            f"{airflow_result.get('detail', '')}). "
+            "Trigger the Airflow DAG manually to start now."
+        )
 
     return UploadRetrainResponse(
-        status="uploaded_and_triggered",
+        status="uploaded_duplicate" if is_duplicate else "uploaded_and_triggered",
         filename=filename,
         rows=len(df),
         columns=list(df.columns),
-        message=(
-            f"CSV validated and stored ({len(df)} rows). "
-            "Training will automatically use this file on the next run - "
-            "it is picked up by ingestion because it is newer than the current processed data. "
-            "Trigger the Airflow DAG 'predictive_maintenance_pipeline' or call POST /retrain "
-            "to start training now."
-        ),
+        message=msg,
         triggered_by=reason,
         save_path=str(save_path),
     )
