@@ -1,6 +1,4 @@
-# =============================================================================
 # Activate local Python environment for the predictive-maintenance project.
-# =============================================================================
 # Usage:
 #   .\scripts\activate-local.ps1
 #
@@ -12,7 +10,6 @@
 #   dvc push                               # pushes to DagsHub
 #
 # Docker is unaffected — these env vars only exist in this PowerShell session.
-# =============================================================================
 
 #Requires -Version 5.1
 $ErrorActionPreference = "Stop"

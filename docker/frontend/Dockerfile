@@ -1,7 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# ============================================================
 # Streamlit Frontend — Predictive Maintenance
-# ============================================================
 # ALWAYS runs on port 8501 inside the container.
 # docker-compose maps FRONTEND_PORT (e.g. 3000) → 8501.
 

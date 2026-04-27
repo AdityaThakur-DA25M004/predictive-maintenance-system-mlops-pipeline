@@ -1,9 +1,6 @@
 """
 Model Training Module with MLflow Experiment Tracking.
 
-Trains a Random Forest classifier for machine failure prediction,
-logs all parameters/metrics/artifacts to MLflow, and registers
-the best model in the MLflow Model Registry.
 """
 
 import os
@@ -120,18 +117,6 @@ def train_model(
 
     mlflow.set_tracking_uri(mlflow_uri)
 
-    # ── FIX: Self-healing experiment setup ───────────────────────────────
-    # If MLflow auto-creates an experiment without an explicit
-    # artifact_location, it falls back to a local path (file:///mlflow).
-    # Clients then try to mkdir /mlflow on their OWN container → PermissionError.
-    #
-    # MLflow makes artifact_location IMMUTABLE — there is no API to change
-    # it on an existing experiment. So if we find one in the bad state,
-    # the only fix is to rename it out of the way and create a fresh
-    # experiment with the correct artifact_location='mlflow-artifacts:/'
-    # (which routes uploads through the MLflow server's --serve-artifacts
-    # proxy, so artifacts live on the server side only).
-    # ─────────────────────────────────────────────────────────────────────
     from mlflow.tracking import MlflowClient
     _client = MlflowClient(tracking_uri=mlflow_uri)
     _existing = _client.get_experiment_by_name(experiment_name)
@@ -172,13 +157,6 @@ def train_model(
             )
 
     elif not _is_http_artifact_loc(_existing.artifact_location):
-        # ── AUTO-HEAL ───────────────────────────────────────────────────
-        # Live experiment exists with a local-filesystem artifact_location
-        # (typically file:///mlflow from a pre-fix run). Clients writing
-        # artifacts to it WILL fail with PermissionError.
-        # Rename the old one to keep its run history accessible under a
-        # new name, then create a fresh experiment under the original name.
-        # ────────────────────────────────────────────────────────────────
         _bad_loc = _existing.artifact_location
         _archive_name = f"{experiment_name}_archived_{int(_time.time())}"
         try:
@@ -298,21 +276,10 @@ def train_model(
     }
 
 
-# ---------------------------------------------------------------------------
+
 # Model registration
-# ---------------------------------------------------------------------------
 def register_best_model(run_id: str, model_name: str, config: dict) -> str:
-    """
-    Register the best model in MLflow Model Registry.
 
-    Args:
-        run_id: MLflow run ID of the best model.
-        model_name: Name for the registered model.
-        config: Project configuration dict.
-
-    Returns:
-        Model version string.
-    """
     mlflow_uri = os.environ.get("MLFLOW_TRACKING_URI", config["mlflow"]["tracking_uri"])
     mlflow.set_tracking_uri(mlflow_uri)
 
@@ -327,28 +294,9 @@ def register_best_model(run_id: str, model_name: str, config: dict) -> str:
         return "local"
 
 
-# ---------------------------------------------------------------------------
 # Full training pipeline
-# ---------------------------------------------------------------------------
 def run_training(config: dict | None = None) -> dict:
-    """
-    Execute the full training pipeline.
 
-    Steps:
-        0. [NEW] Check if an uploaded file is newer than the processed data.
-           If so (or if processed data is missing), re-run ingestion and
-           preprocessing automatically so training always uses the right data.
-        1. Load processed train/test data.
-        2. Train models with hyperparameter search + MLflow logging.
-        3. Save the best model locally.
-        4. Register in MLflow Model Registry.
-
-    Args:
-        config: Optional config dict.
-
-    Returns:
-        Dictionary with training results.
-    """
     if config is None:
         config = load_config()
 
@@ -390,7 +338,7 @@ def run_training(config: dict | None = None) -> dict:
         run_preprocessing(config)
         logger.info("[PIPELINE] Preprocessing done")
 
-    # ── Step 1: Load processed data ────────────────────────────────────
+    # ── Step 1: Load processed data 
     train_df = pd.read_csv(os.path.join(processed_dir, "train_processed.csv"))
     test_df = pd.read_csv(os.path.join(processed_dir, "test_processed.csv"))
 
@@ -411,7 +359,6 @@ def run_training(config: dict | None = None) -> dict:
     training_duration = _time.time() - t0
     logger.info(f"Training completed in {training_duration:.1f}s")
 
-    # Emit Prometheus metrics (non-fatal — workers may not have the API metrics module)
     try:
         from api.metrics import TRAINING_DURATION_SECONDS, LAST_TRAINING_TIMESTAMP
         TRAINING_DURATION_SECONDS.observe(training_duration)

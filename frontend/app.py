@@ -1,12 +1,6 @@
 """
 Predictive Maintenance — Main Dashboard.
 
-Visual upgrade vs previous version:
-  * Hero band with embedded live stats (predictions today, last train, drift)
-  * Health pills coloured by status (green/amber/red) instead of flat metrics
-  * Performance gauges with progress bars + qualitative labels
-  * Pipeline timeline showing which stages have run
-  * Polished quick-action cards instead of a plain info box
 """
 import sys
 import os
@@ -20,7 +14,7 @@ setup_page("Dashboard", icon="🏭")
 render_sidebar()
 
 
-# ── Page-specific CSS ──────────────────────────────────────────────────────
+#  Page-specific CSS 
 st.markdown("""
 <style>
 /* Hero with embedded stats */
@@ -152,7 +146,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ── Data fetching ──────────────────────────────────────────────────────────
+#  Data fetching 
 client = get_client()
 
 try:
@@ -181,7 +175,7 @@ except APIError:
     upload_list = []
 
 
-# ── Hero band with embedded stats ──────────────────────────────────────────
+#  Hero band with embedded stats 
 up_s = int(health.get("uptime_seconds", 0))
 if up_s >= 3600:
     uptime_str = f"{up_s // 3600}h {(up_s % 3600) // 60}m"
@@ -224,7 +218,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
-# ── System health: colour-coded status cards ──────────────────────────────
+#  System health: colour-coded status cards 
 st.markdown('<div class="pm-section">📡 System Health</div>', unsafe_allow_html=True)
 
 
@@ -268,7 +262,7 @@ with sc4:
     """, unsafe_allow_html=True)
 
 
-# ── Model performance gauges ───────────────────────────────────────────────
+#  Model performance gauges 
 st.markdown('<div class="pm-section">📈 Model Performance</div>', unsafe_allow_html=True)
 
 
@@ -307,7 +301,7 @@ else:
     st.info("📦 Model metrics not yet available. Run the training pipeline first.")
 
 
-# ── Live feedback (only show if feedback exists) ──────────────────────────
+#  Live feedback (only show if feedback exists) 
 if fb.get("total_feedback", 0) > 0:
     st.markdown('<div class="pm-section">🔁 Live Feedback Accuracy</div>', unsafe_allow_html=True)
     f1col, f2col, f3col = st.columns(3)
@@ -330,11 +324,9 @@ if fb.get("total_feedback", 0) > 0:
         ), unsafe_allow_html=True)
 
 
-# ── Pipeline status timeline ───────────────────────────────────────────────
+#  Pipeline status timeline 
 st.markdown('<div class="pm-section">🔄 Pipeline Status</div>', unsafe_allow_html=True)
 
-# Status logic: green if model loaded (means full pipeline ran at least once),
-# amber if only API is up, grey otherwise.
 have_model = bool(health.get("model_loaded"))
 have_uploads = total_uploads > 0
 stages = [
@@ -364,7 +356,7 @@ if upload_list:
     st.caption(f"📂 Latest dataset upload: **{latest_str}** · {total_uploads} total")
 
 
-# ── System overview (kept, slightly polished) ──────────────────────────────
+#  System overview 
 st.markdown('<div class="pm-section">🎯 System Overview</div>', unsafe_allow_html=True)
 col_a, col_b = st.columns(2)
 with col_a:
@@ -387,7 +379,7 @@ with col_b:
     """)
 
 
-# ── Quick action cards ─────────────────────────────────────────────────────
+#  Quick action cards 
 st.markdown('<div class="pm-section">🚀 Quick Actions</div>', unsafe_allow_html=True)
 
 actions = [

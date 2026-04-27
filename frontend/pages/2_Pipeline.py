@@ -16,7 +16,7 @@ render_header("🔄 ML Pipeline",
 
 cfg = get_config()
 
-# ── DAG Diagram ───────────────────────────────────────────────────────────
+#  DAG Diagram 
 st.markdown("### Pipeline Architecture")
 
 nodes = {
@@ -58,7 +58,7 @@ fig.update_layout(height=420, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(
                   margin=dict(l=20, r=20, t=10, b=10))
 st.plotly_chart(fig, use_container_width=True)
 
-# ── Stage details ─────────────────────────────────────────────────────────
+#  Stage details 
 st.markdown("---")
 st.markdown("### Stage Details")
 stages = [
@@ -95,8 +95,6 @@ for i, (icon, name, desc, module, outputs, est_time) in enumerate(stages):
 st.markdown("---")
 st.markdown("### Open external tools")
 from frontend.common import _is_reachable
-# (label, browser_url, internal_url) — internal_url is for the reachability
-# probe (Docker DNS), browser_url is what the user's browser opens.
 tools_pipeline = [
     ("🔬 MLflow",     cfg.mlflow_url,     cfg.mlflow_internal_url),
     ("🌀 Airflow",    cfg.airflow_url,    cfg.airflow_internal_url),

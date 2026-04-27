@@ -1,16 +1,5 @@
-# ============================================================
 # Predictive Maintenance — Docker Compose
-# ============================================================
-# Fixes applied:
-#   1. Streamlit port mismatch → use 8501 EVERYWHERE
-#   2. API/Airflow missing dill → added to requirements
-#   3. MLflow PermissionError /mlflow → --serve-artifacts
-#   4. NEW: Frontend external-tool URLs split into browser-facing
-#      (http://localhost:<host_port>) vs Docker-internal
-#      (http://<service>:<container_port>). Without this split,
-#      st.link_button rendered links like http://airflow-webserver:8080
-#      that the user's browser cannot resolve (DNS_PROBE_FINISHED_NXDOMAIN).
-# ============================================================
+
 
 x-airflow-common: &airflow-common
   build:
@@ -32,8 +21,6 @@ x-airflow-common: &airflow-common
     PYTHONPATH: /opt/airflow:/app
     UPLOADS_DIR: /app/data/feedback/uploads
     DRIFT_REF_SAMPLES_PATH: /app/data/baselines/ref_samples.json
-    # Used by task_reload_api_baselines to hot-reload baselines into the API
-    # without requiring a container restart.
     API_INTERNAL_URL: http://api:8000
     RETRAIN_API_KEY: ${RETRAIN_API_KEY}
     DVC_REMOTE_NAME: ${DVC_REMOTE_NAME:-dagshub}
@@ -51,8 +38,6 @@ x-airflow-common: &airflow-common
     - ./src:/app/src
     - ./configs:/app/configs
     - ./data:/app/data
-    # CRITICAL: feedback_data overrides ./data for /app/data/feedback only.
-    # Mount this AFTER ./data:/app/data so it takes precedence.
     - feedback_data:/app/data/feedback
     - ./models:/app/models
     - ./scripts:/app/scripts
@@ -136,11 +121,6 @@ services:
     restart: unless-stopped
     networks: [pm-net]
 
-  # ── Streamlit Frontend ──────────────────────────────────────
-  # FIX 4: external-tool URLs split into BROWSER vs INTERNAL.
-  # *_URL          → opened by user's browser → must use localhost + host port
-  # *_INTERNAL_URL → used inside container by _is_reachable() health probe
-  #                  → uses Docker DNS service name + container port
   frontend:
     build:
       context: .
@@ -151,7 +131,7 @@ services:
       # In-container HTTP (Streamlit → API)
       API_URL: http://api:8000
 
-      # ── BROWSER-FACING URLs (rendered as st.link_button hrefs) ────
+      # ── BROWSER-FACING URLs 
       API_BROWSER_URL: http://localhost:${API_PORT}
       MLFLOW_URL:      http://localhost:5000
       AIRFLOW_URL:     http://localhost:${AIRFLOW_PORT}

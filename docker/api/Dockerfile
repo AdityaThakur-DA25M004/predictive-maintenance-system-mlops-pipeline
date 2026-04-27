@@ -1,7 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# ============================================================
 # FastAPI Backend — Predictive Maintenance
-# ============================================================
 # Multi-stage build to keep the runtime image small.
 
 # ---- Stage 1: builder ----

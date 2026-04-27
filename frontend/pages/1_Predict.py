@@ -22,7 +22,7 @@ tab_single, tab_batch, tab_feedback = st.tabs([
     "🎯 Single Prediction", "📂 Batch (CSV)", "🔁 Submit Ground Truth",
 ])
 
-# ══ Single Prediction ═════════════════════════════════════════════════════
+#  Single Prediction 
 with tab_single:
     st.markdown("#### Sensor Readings")
     with st.form("predict_form", clear_on_submit=False):
@@ -106,7 +106,7 @@ with tab_single:
             st.info(f"ℹ️ Keep prediction ID **{result.get('prediction_id')}**. "
                     "Submit the actual outcome in the *Submit Ground Truth* tab.")
 
-# ══ Batch Prediction ═════════════════════════════════════════════════════
+#  Batch Prediction 
 with tab_batch:
     st.markdown("#### Upload CSV of sensor readings")
     st.caption("Columns: `air_temperature`, `process_temperature`, "
@@ -201,7 +201,7 @@ with tab_batch:
                                    preds_df.to_csv(index=False).encode(),
                                    "predictions.csv", "text/csv")
 
-# ══ Ground-Truth Feedback ════════════════════════════════════════════════
+#  Ground-Truth Feedback 
 with tab_feedback:
     st.markdown("#### Report the actual outcome")
     st.caption("Submit ground truth to track live model accuracy.")

@@ -76,53 +76,30 @@ UPLOADS_DIR = os.environ.get(
     str(PROJECT_ROOT / "data" / "feedback" / "uploads"),
 )
 
-# ---------------------------------------------------------------------------
 # Airflow REST API config (used by /retrain to actually start the DAG run
 # instead of only emitting an alert + Prometheus counter)
-# ---------------------------------------------------------------------------
 AIRFLOW_API_URL = os.environ.get("AIRFLOW_API_URL", "http://airflow-webserver:8080")
 AIRFLOW_USERNAME = os.environ.get("AIRFLOW_USERNAME", "")
 AIRFLOW_PASSWORD = os.environ.get("AIRFLOW_PASSWORD", "")
 AIRFLOW_DAG_ID = os.environ.get("AIRFLOW_DAG_ID", "predictive_maintenance_pipeline")
 
-# ---------------------------------------------------------------------------
 # Global state
-# ---------------------------------------------------------------------------
 _state = {
     "model": None, "scaler": None, "baselines": None,
     "ref_samples": None, "baselines_loaded_at": None,
     "start_time": None, "model_version": "unknown",
     "model_source": "unloaded", "prediction_buffer": [],
-    # Track recent upload content hashes so duplicate uploads of the same CSV
-    # don't re-fire the retrain email. Keyed by md5 of CSV bytes, value is
-    # unix timestamp of when we last alerted for that content.
     "recent_upload_alerts": {},
-    # Track last-sent timestamp per `reason` for the manual /retrain endpoint
-    # so accidental double-clicks don't double-email.
     "last_manual_retrain_alert": {},
 }
 
-# How long to suppress duplicate retrain alerts for the same uploaded CSV.
-# 1 hour absorbs accidental re-uploads (double-click, browser retry, user
-# verifying the file landed). Long-tail re-uploads after this window are
-# presumed intentional and DO get a fresh alert.
+
 RECENT_UPLOAD_TTL = 3600  # seconds
 
-# Manual /retrain throttle: don't email twice for the same reason within this
-# window. Different reasons reset the timer (so "manual" → "drift_detected"
-# would still send both alerts).
 RETRAIN_ALERT_THROTTLE_SECONDS = 300  # 5 minutes
 
 
-def _is_duplicate_upload(csv_bytes: bytes) -> bool:
-    """
-    Return True if this exact CSV content was uploaded within the last
-    RECENT_UPLOAD_TTL seconds. Used to suppress duplicate retrain emails.
-
-    Side effects:
-      - Garbage-collects entries older than the TTL
-      - Records the current upload's hash with the current timestamp
-    """
+def _is_duplicate_upload(csv_bytes):
     digest = hashlib.md5(csv_bytes).hexdigest()
     now = time.time()
     recent = _state["recent_upload_alerts"]
@@ -139,9 +116,7 @@ def _is_duplicate_upload(csv_bytes: bytes) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
 # Feedback store (SQLite)
-# ---------------------------------------------------------------------------
 def _init_feedback_db() -> None:
     Path(FEEDBACK_DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(FEEDBACK_DB_PATH) as conn:
@@ -197,9 +172,7 @@ def _update_feedback_accuracy() -> Optional[float]:
     return acc
 
 
-# ---------------------------------------------------------------------------
 # Artifact loading
-# ---------------------------------------------------------------------------
 def _load_artifacts() -> None:
     models_dir = PROJECT_ROOT / "models"
     data_dir = PROJECT_ROOT / "data" / "baselines"
@@ -261,9 +234,7 @@ def _load_artifacts() -> None:
     _state["start_time"] = time.time()
 
 
-# ---------------------------------------------------------------------------
 # Authentication
-# ---------------------------------------------------------------------------
 async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
     if not x_api_key or not secrets.compare_digest(x_api_key, RETRAIN_API_KEY):
         raise HTTPException(
@@ -272,9 +243,7 @@ async def require_api_key(x_api_key: Optional[str] = Header(default=None)) -> No
         )
 
 
-# ---------------------------------------------------------------------------
 # Lifespan
-# ---------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _load_artifacts()
@@ -285,9 +254,7 @@ async def lifespan(app: FastAPI):
     logger.info("Predictive Maintenance API shutting down")
 
 
-# ---------------------------------------------------------------------------
 # App
-# ---------------------------------------------------------------------------
 app = FastAPI(
     title="Predictive Maintenance API",
     description="Machine failure prediction with drift detection and feedback loop.",
@@ -304,23 +271,8 @@ app.add_middleware(
 )
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
-def _trigger_airflow_dag(reason: str = "manual") -> dict:
-    """
-    Start a DagRun for the predictive_maintenance_pipeline via Airflow's
-    stable REST API. Returns a dict with the trigger result.
-
-    Without this, the /retrain endpoint only increments a Prometheus counter
-    and sends an alert — no training actually happens until someone opens
-    the Airflow UI manually. Calling this from the API closes the loop:
-    click in Streamlit → DAG actually runs → metrics update.
-
-    Non-fatal: if Airflow is unreachable or returns an error, we log and
-    return status=skipped/failed but don't 500 the API request — the alert
-    + Prometheus counter still fired upstream.
-    """
+def _trigger_airflow_dag(reason: str = "manual"):
     if not (AIRFLOW_USERNAME and AIRFLOW_PASSWORD):
         logger.warning(
             "AIRFLOW_USERNAME / AIRFLOW_PASSWORD not set — DAG trigger skipped"
@@ -382,9 +334,7 @@ def _risk_level(prob: float) -> str:
     return "CRITICAL"
 
 
-# ---------------------------------------------------------------------------
 # System endpoints
-# ---------------------------------------------------------------------------
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 async def health_check():
     return HealthResponse(
@@ -440,9 +390,7 @@ async def feature_importance():
     }
 
 
-# ---------------------------------------------------------------------------
 # Prediction endpoints
-# ---------------------------------------------------------------------------
 @app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
 async def predict(reading: SensorInput):
     ACTIVE_REQUESTS.inc()
@@ -533,9 +481,7 @@ async def predict_batch(batch: BatchInput):
         ACTIVE_REQUESTS.dec()
 
 
-# ---------------------------------------------------------------------------
 # Feedback (ground-truth) loop — REQUIRED by MLOps guideline §II.E.2
-# ---------------------------------------------------------------------------
 @app.post("/feedback", response_model=FeedbackResponse, tags=["Feedback"])
 async def submit_feedback(feedback: FeedbackInput):
     """Record the ground-truth label for a previous prediction."""
@@ -600,9 +546,7 @@ async def feedback_stats():
     )
 
 
-# ---------------------------------------------------------------------------
 # Drift endpoint
-# ---------------------------------------------------------------------------
 @app.post("/drift/check", response_model=DriftReport, tags=["Monitoring"])
 async def check_drift(batch: BatchInput):
     DRIFT_CHECK_COUNT.inc()
@@ -622,9 +566,6 @@ async def check_drift(batch: BatchInput):
 
     df = engineer_features(pd.DataFrame(rows))
     feature_cols = get_feature_columns()
-    # Pass ref_samples (real training samples) so KS test isn't comparing
-    # against a synthetic Gaussian. baselines_path is a fallback so detect_drift
-    # can auto-discover ref_samples.json on disk if _state was never populated.
     data_dir = PROJECT_ROOT / "data" / "baselines"
     report = detect_drift(
         df, _state["baselines"], feature_cols,
@@ -646,22 +587,12 @@ async def check_drift(batch: BatchInput):
     return DriftReport(**report)
 
 
-# ---------------------------------------------------------------------------
-# Admin: reload baselines + ref_samples from disk (called by Airflow DAG
-# at the end of preprocessing so the live API picks up new files without
-# a container restart).
-# ---------------------------------------------------------------------------
+
 @app.post(
     "/admin/reload-baselines", tags=["Maintenance"],
     dependencies=[Depends(require_api_key)],
 )
 async def reload_baselines():
-    """
-    Reload `drift_baselines.json` and `ref_samples.json` from disk into
-    process memory. Intended to be called by the Airflow DAG after the
-    preprocessing task rewrites these files; without this, the API keeps
-    using stale in-memory baselines until the container is restarted.
-    """
     data_dir = PROJECT_ROOT / "data" / "baselines"
     baselines_path = data_dir / "drift_baselines.json"
     ref_samples_path = data_dir / "ref_samples.json"
@@ -701,33 +632,11 @@ async def reload_baselines():
     }
 
 
-# ---------------------------------------------------------------------------
-# Admin: reload model + training metrics from disk (called by Airflow DAG
-# at the end of training so Prometheus / Grafana see the new f1/accuracy/
-# version / last-training-timestamp without a container restart).
-# ---------------------------------------------------------------------------
 @app.post(
     "/admin/reload-model", tags=["Maintenance"],
     dependencies=[Depends(require_api_key)],
 )
 async def reload_model(data_source: str = "unknown"):
-    """
-    Reload `best_model.joblib`, `scaler.joblib`, and `test_metrics.json`
-    from disk and refresh the corresponding Prometheus gauges:
-      - model_accuracy
-      - model_f1_score
-      - last_training_timestamp_seconds
-      - model_version_numeric
-      - retrain_data_source  (1 = uploaded CSV, 0 = default)
-
-    Without this, Grafana panels for "Model F1 Score", "Model Accuracy",
-    "Time Since Last Training", etc. show stale values because the API
-    only loaded these at startup.
-
-    `data_source` query param: "uploaded" | "default" | "unknown".
-    Sent by the Airflow DAG so retrain_data_source reflects the truth
-    of what the training task actually used.
-    """
     models_dir = PROJECT_ROOT / "models"
     model_path = models_dir / "best_model.joblib"
     scaler_path = models_dir / "scaler.joblib"
@@ -796,23 +705,12 @@ async def reload_model(data_source: str = "unknown"):
     }
 
 
-# ---------------------------------------------------------------------------
 # Retrain (authenticated)
-# ---------------------------------------------------------------------------
 @app.post(
     "/retrain", response_model=RetrainResponse, tags=["Maintenance"],
     dependencies=[Depends(require_api_key)],
 )
 async def trigger_retrain(reason: str = "manual"):
-    """
-    Trigger model retraining (requires X-API-Key header).
-
-    Steps:
-      1. Increment Prometheus retrain counter (visible in Grafana).
-      2. Send retrain alert (email + log).
-      3. Actually start the Airflow DAG via REST API so training runs
-         end-to-end without a human opening the Airflow UI.
-    """
     RETRAIN_TRIGGERS.labels(reason=reason).inc()
     logger.info(f"Retraining triggered — reason: {reason}")
 
@@ -823,8 +721,6 @@ async def trigger_retrain(reason: str = "manual"):
     )
     data_source = "uploaded" if is_uploaded else "default"
 
-    # Throttle: skip the email if we already sent one for the same reason
-    # within RETRAIN_ALERT_THROTTLE_SECONDS. Catches accidental double-clicks.
     now = time.time()
     last_sent_map = _state["last_manual_retrain_alert"]
     last_ts = last_sent_map.get(reason, 0)
@@ -848,9 +744,6 @@ async def trigger_retrain(reason: str = "manual"):
         except Exception as _ra:
             logger.warning(f"Retrain alert failed (non-fatal): {_ra}")
 
-    # Actually start the Airflow DAG so training runs without a human
-    # opening the Airflow UI. Result is reported back to the caller so
-    # the frontend can show whether training really kicked off.
     airflow_result = _trigger_airflow_dag(reason=reason)
     if airflow_result["status"] == "triggered":
         message = (
@@ -1023,23 +916,12 @@ async def list_uploads():
     dependencies=[Depends(require_api_key)],
 )
 async def rollback_model(request: RollbackRequest):
-    """
-    Roll back to a previous model version (requires X-API-Key header).
-
-    Strategy:
-    - If ``target_version`` is given, attempt to pull that version from the
-      MLflow Model Registry and load it.
-    - If not given, reload the local best_model.joblib + scaler.joblib on disk
-      (useful after a bad automated retrain overwrote the artifacts).
-
-    The in-memory model is hot-swapped — the API keeps serving during rollback.
-    """
     previous_version = _state.get("model_version", "unknown")
     models_dir = PROJECT_ROOT / "models"
 
     try:
         if request.target_version:
-            # ── MLflow registry rollback ───────────────────────────────
+            #  MLflow registry rollback 
             import mlflow.sklearn
             from src.utils import load_config
             cfg = load_config()
@@ -1051,7 +933,7 @@ async def rollback_model(request: RollbackRequest):
             model = mlflow.sklearn.load_model(model_uri)
             target_ver = request.target_version
         else:
-            # ── Local artifact reload ──────────────────────────────────
+            #  Local artifact reload 
             model_path = models_dir / "best_model.joblib"
             if not model_path.exists():
                 ROLLBACK_TRIGGERS.labels(status="failed").inc()

@@ -14,11 +14,6 @@ Configure via environment variables:
   ALERT_SMTP_USER=your_email@gmail.com
   ALERT_SMTP_PASSWORD=your_app_password
   ALERT_RECIPIENT=ops-team@yourcompany.com
-
-Usage:
-  from src.alert_notifier import send_drift_alert, send_retrain_alert
-  send_drift_alert(["Air temperature [K]", "Torque [Nm]"], n_drifted=2)
-  send_retrain_alert("drift_detected", model_version="1.0", new_f1=0.82)
 """
 
 import os
@@ -31,9 +26,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Configuration (from environment)
-# ---------------------------------------------------------------------------
 ALERT_EMAIL_ENABLED = os.environ.get("ALERT_EMAIL_ENABLED", "false").lower() == "true"
 SMTP_HOST = os.environ.get("ALERT_SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("ALERT_SMTP_PORT", "587"))
@@ -57,9 +50,7 @@ def _record_alert(alert_type: str, sent: bool) -> None:
         pass  # metrics not available in Airflow workers — safe to ignore
 
 
-# ---------------------------------------------------------------------------
 # Core email sender
-# ---------------------------------------------------------------------------
 def _send_email(subject: str, body_html: str, alert_type: str = "generic") -> bool:
     """
     Send an email alert. Returns True on success, False on failure.
@@ -99,9 +90,7 @@ def _send_email(subject: str, body_html: str, alert_type: str = "generic") -> bo
         return False
 
 
-# ---------------------------------------------------------------------------
 # Alert: Data Drift Detected
-# ---------------------------------------------------------------------------
 def send_drift_alert(drifted_features: list[str], n_drifted: int) -> bool:
     """Send an alert when data drift is detected."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -123,22 +112,13 @@ def send_drift_alert(drifted_features: list[str], n_drifted: int) -> bool:
     return _send_email(subject, body, alert_type="drift")
 
 
-# ---------------------------------------------------------------------------
 # Alert: Retraining Triggered  (called at trigger time from API + Airflow)
-# ---------------------------------------------------------------------------
 def send_retrain_alert(reason: str, model_version: str = "unknown",
                        new_f1: Optional[float] = None,
                        triggered_by: str = "api",
                        data_source: str = "unknown") -> bool:
     """
     Send an alert when model retraining is triggered.
-
-    Args:
-        reason: Why retraining was triggered (drift_detected, manual, csv_upload, …)
-        model_version: Version of the current (pre-retrain) model.
-        new_f1: F1 of the retrained model, if already available.
-        triggered_by: "api" | "airflow" | "upload"
-        data_source: "uploaded" | "default"
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     f1_line = f"<p><strong>New F1 score:</strong> {new_f1:.4f}</p>" if new_f1 else ""
@@ -173,13 +153,6 @@ def send_training_complete_alert(new_f1: float, model_version: str,
                                   duration_seconds: Optional[float] = None) -> bool:
     """
     Send an alert when a full training run completes successfully via Airflow DAG.
-
-    Args:
-        new_f1: F1 score of the new model.
-        model_version: MLflow model registry version.
-        run_id: MLflow run ID for reproducibility.
-        data_source: "uploaded" | "default" | "existing_processed"
-        duration_seconds: Elapsed seconds for the full training run.
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     dur_line = (f"<p><strong>Training duration:</strong> {duration_seconds:.0f}s "
@@ -235,9 +208,7 @@ def send_accuracy_alert(rolling_accuracy: float,
     return _send_email(subject, body, alert_type="accuracy")
 
 
-# ---------------------------------------------------------------------------
 # Alert: High Error Rate
-# ---------------------------------------------------------------------------
 def send_error_rate_alert(error_rate: float, threshold: float = 0.05) -> bool:
     """Send an alert when the API error rate exceeds the threshold."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

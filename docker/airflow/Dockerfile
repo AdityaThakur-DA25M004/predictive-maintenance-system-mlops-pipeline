@@ -1,7 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# ============================================================
 # Airflow — Predictive Maintenance Pipeline
-# ============================================================
 
 ARG AIRFLOW_VERSION=2.9.2
 ARG PYTHON_VERSION=3.11

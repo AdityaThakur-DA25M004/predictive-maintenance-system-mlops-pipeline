@@ -1,10 +1,6 @@
 """
 Shared utilities for the Predictive Maintenance Streamlit frontend.
 
-Centralizes:
-  - Environment/config reading
-  - API client with consistent error handling
-  - Reusable UI components (status pills, metric cards)
 """
 
 from __future__ import annotations
@@ -15,28 +11,17 @@ import requests
 import streamlit as st
 
 
-# ---------------------------------------------------------------------------
 # Config
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class AppConfig:
-    # ── In-container HTTP target for the API client ──────────────────────
     api_url: str
 
-    # ── Browser-facing URLs (used in <a href> links and st.link_button) ──
-    # These must resolve from the user's BROWSER, not from inside the
-    # frontend container. So in Docker they point to the host's exposed
-    # ports (http://localhost:PORT), NOT to Docker DNS service names.
     api_browser_url: str
     mlflow_url: str
     airflow_url: str
     grafana_url: str
     prometheus_url: str
 
-    # ── Internal URLs used ONLY by _is_reachable() health checks ─────────
-    # _is_reachable runs inside the frontend container, where Docker DNS
-    # service names (mlflow:5000, grafana:3000, ...) work but localhost
-    # would point at the frontend itself.
     mlflow_internal_url: str
     airflow_internal_url: str
     grafana_internal_url: str
@@ -47,17 +32,12 @@ class AppConfig:
 
 @st.cache_resource
 def get_config() -> AppConfig:
-    # Helper: fall back to the public URL if no internal override is provided
-    # (works for local non-Docker dev where browser and process see the same hosts).
     def _internal(name: str, default: str) -> str:
         return os.environ.get(f"{name}_INTERNAL_URL",
                               os.environ.get(f"{name}_URL", default))
 
     return AppConfig(
-        # In-container API calls must keep using the Docker service hostname
         api_url=os.environ.get("API_URL", "http://localhost:8000"),
-        # Browser link to API docs — separate var so the container can keep
-        # API_URL=http://api:8000 for in-container HTTP calls.
         api_browser_url=os.environ.get(
             "API_BROWSER_URL",
             os.environ.get("API_URL", "http://localhost:8000"),
@@ -75,9 +55,7 @@ def get_config() -> AppConfig:
     )
 
 
-# ---------------------------------------------------------------------------
 # API client
-# ---------------------------------------------------------------------------
 class APIError(Exception):
     def __init__(self, message: str, status_code: Optional[int] = None):
         super().__init__(message)
@@ -85,7 +63,6 @@ class APIError(Exception):
 
 
 class APIClient:
-    """Thin wrapper around the FastAPI backend with consistent error handling."""
 
     def __init__(self, cfg: AppConfig):
         self._cfg = cfg
@@ -160,9 +137,7 @@ def get_client() -> APIClient:
     return APIClient(get_config())
 
 
-# ---------------------------------------------------------------------------
 # Page setup
-# ---------------------------------------------------------------------------
 _CSS = """
 <style>
 .main { padding-top: 1rem; }

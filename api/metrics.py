@@ -1,16 +1,10 @@
 """
 Prometheus Metrics Instrumentation for the Predictive Maintenance API.
-
-Defines custom metrics for monitoring prediction latency, counts,
-error rates, drift status, model performance, and real-world
-performance decay via the feedback loop.
 """
 
 from prometheus_client import Counter, Histogram, Gauge, Info
 
-# ---------------------------------------------------------------------------
 # Request metrics
-# ---------------------------------------------------------------------------
 PREDICTION_COUNT = Counter(
     "prediction_requests_total",
     "Total number of prediction requests",
@@ -35,9 +29,7 @@ ACTIVE_REQUESTS = Gauge(
     "Number of currently active requests",
 )
 
-# ---------------------------------------------------------------------------
 # Model metrics
-# ---------------------------------------------------------------------------
 FAILURE_PREDICTIONS = Counter(
     "failure_predictions_total",
     "Total number of failure predictions",
@@ -54,16 +46,12 @@ MODEL_ACCURACY = Gauge("model_accuracy", "Current model accuracy on test set")
 MODEL_F1_SCORE = Gauge("model_f1_score", "Current model F1 score on test set")
 MODEL_INFO = Info("model", "Information about the loaded model")
 
-# ---------------------------------------------------------------------------
 # Drift metrics
-# ---------------------------------------------------------------------------
 DRIFT_DETECTED = Gauge("drift_detected", "Whether data drift has been detected (1=yes, 0=no)")
 DRIFT_FEATURES_COUNT = Gauge("drift_features_count", "Number of features with detected drift")
 DRIFT_CHECK_COUNT = Counter("drift_checks_total", "Total number of drift detection checks performed")
 
-# ---------------------------------------------------------------------------
-# Feedback loop metrics (guideline §II.E.2 — real-world performance decay)
-# ---------------------------------------------------------------------------
+# Feedback loop metrics 
 FEEDBACK_COUNT = Counter(
     "feedback_total",
     "Total number of ground-truth feedback events received",
@@ -75,18 +63,14 @@ FEEDBACK_ROLLING_ACCURACY = Gauge(
     "Rolling accuracy over the last N ground-truth feedback events",
 )
 
-# ---------------------------------------------------------------------------
 # Maintenance metrics
-# ---------------------------------------------------------------------------
 RETRAIN_TRIGGERS = Counter(
     "retrain_triggers_total",
     "Total number of retraining triggers",
     ["reason"],
 )
 
-# ---------------------------------------------------------------------------
 # Upload & retraining observability metrics
-# ---------------------------------------------------------------------------
 UPLOAD_COUNT = Counter(
     "dataset_uploads_total",
     "Total number of CSV dataset uploads via /retrain/upload",
@@ -124,9 +108,7 @@ MODEL_VERSION_NUMERIC = Gauge(
     "Numeric version of the currently deployed model (from MLflow registry)",
 )
 
-# ---------------------------------------------------------------------------
 # Alert notification metrics
-# ---------------------------------------------------------------------------
 ALERT_NOTIFICATIONS_TOTAL = Counter(
     "alert_notifications_total",
     "Total number of alert notifications dispatched by the system",

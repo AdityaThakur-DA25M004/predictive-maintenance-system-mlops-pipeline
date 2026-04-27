@@ -1,15 +1,10 @@
-# ============================================================
 # Predictive Maintenance — LOCAL config.yaml (running outside Docker)
-# ============================================================
 # Use this when running components directly on your Windows host.
 #
 # The only material difference vs the Docker config.yaml is:
 #   mlflow.tracking_uri → DagsHub HTTPS (not the in-Docker mlflow:5000)
 #
 # Note: the env var MLFLOW_TRACKING_URI in .env takes PRECEDENCE over
-# whatever is in this file (see model_training.py:118). So if you set
-# both, the env var wins. This file is the fallback default.
-# ============================================================
 
 project:
   name: "Predictive Maintenance System"

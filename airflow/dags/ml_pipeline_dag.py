@@ -2,42 +2,6 @@
 Airflow DAG for the Predictive Maintenance ML Pipeline.
 
 Orchestrates: ingest → drift_check → preprocess → train → branch
-
-KEY ARCHITECTURE FIX (this version)
------------------------------------
-drift_check now runs BEFORE preprocessing.
-
-Why? Preprocessing overwrites drift_baselines.json + ref_samples.json
-from the *current* training data on every run. The previous DAG order
-(ingest → preprocess → drift_check) made drift_check compare the new
-data against baselines that had ALREADY been derived from that same
-data — so drift_check could never detect anything, and the
-retrain_notification branch was always silently skipped.
-
-NEW order: ingest → drift_check (against OLD baselines) → preprocess
-(writes NEW baselines) → reload_api_baselines → train → reload_api_model
-→ drift_branch.
-
-This means:
-  * On a regular daily run with the default dataset and no drift,
-    drift_check reads the previous baselines (which match the default
-    dataset) → no drift → no_drift_end.
-  * On an upload of a drifted dataset, drift_check reads the old
-    baselines from a previous train → drift IS detected → branches to
-    retrain_notification → email fires → pipeline_end.
-  * Either way, training and the API hot-reload still happen so the
-    model adapts to the new data. The branch decision now honestly
-    reflects what the new data looks like vs what the model knew.
-
-The `fresh_upload` guard from the previous version is REMOVED — it was
-dead code anyway (drift was never True due to baseline overwrite), and
-its existence was misleading the Airflow Graph view to show no_drift_end
-on uploads where drift was clearly present.
-
-First-run safeguard: if drift_baselines.json doesn't exist yet (very
-first DAG run before preprocess has ever populated it), drift_check
-returns overall_drift=False with reference_type="first_run_no_baseline"
-so the DAG doesn't fail.
 """
 
 from datetime import datetime, timedelta
@@ -48,7 +12,13 @@ import sys
 import os
 import json
 import logging
-
+import pandas as pd
+from src.data_preprocessing import engineer_features, get_feature_columns
+from src.drift_detection import detect_drift
+from src.utils import load_config, get_project_root, load_json
+from src.alert_notifier import send_training_complete_alert
+from src.data_ingestion import run_ingestion
+from src.data_preprocessing import run_preprocessing
 PROJECT_ROOT = os.environ.get("PROJECT_ROOT", "/app")
 sys.path.insert(0, PROJECT_ROOT)
 
@@ -66,7 +36,7 @@ default_args = {
 
 
 def task_data_ingestion(**kwargs):
-    from src.data_ingestion import run_ingestion
+    
     result = run_ingestion()
     logger.info(
         f"Ingestion result: {result['status']} | "
@@ -85,21 +55,6 @@ def task_data_ingestion(**kwargs):
 
 
 def task_drift_check(**kwargs):
-    """
-    Drift check using OLD baselines (this task runs BEFORE preprocess).
-
-    The processed test.csv produced by ingest is the new data; the
-    drift_baselines.json on disk still reflects the previous training
-    run. So this comparison answers: "does the freshly-ingested data
-    differ from what the currently-deployed model was trained on?"
-
-    First-run safeguard: if no baselines exist yet, skip drift detection
-    rather than failing the DAG. preprocess will create them downstream.
-    """
-    import pandas as pd
-    from src.data_preprocessing import engineer_features, get_feature_columns
-    from src.drift_detection import detect_drift
-    from src.utils import load_config, get_project_root, load_json
 
     config = load_config()
     root = get_project_root()
@@ -129,7 +84,7 @@ def task_drift_check(**kwargs):
     feature_cols = get_feature_columns()
     baselines = load_json(baselines_path)
 
-    # Pass baselines_path so detect_drift can find ref_samples.json (also pre-overwrite)
+    # pass baselines_path so detect_drift can find ref_samples.json (also pre-overwrite)
     report = detect_drift(
         df, baselines, feature_cols, baselines_path=baselines_path
     )
@@ -149,7 +104,7 @@ def task_drift_check(**kwargs):
 
 
 def task_preprocessing(**kwargs):
-    from src.data_preprocessing import run_preprocessing
+    
     result = run_preprocessing()
     logger.info(f"Preprocessing result: {result['status']}")
     kwargs["ti"].xcom_push(key="preprocessing_result", value=json.dumps({
@@ -174,7 +129,6 @@ def task_model_training(**kwargs):
     )
 
     try:
-        from src.alert_notifier import send_training_complete_alert
         send_training_complete_alert(
             new_f1=result["best_f1"],
             model_version=str(result["model_version"]),
@@ -196,8 +150,7 @@ def task_model_training(**kwargs):
     return result["status"]
 
 
-def _call_api_reload(endpoint: str, params: dict | None = None) -> str:
-    """Best-effort POST to one of the API's /admin/reload-* endpoints."""
+def _call_api_reload(endpoint, params):
     import requests
     api_url = os.environ.get("API_INTERNAL_URL", "http://api:8000")
     api_key = os.environ.get("RETRAIN_API_KEY", "")
@@ -244,19 +197,6 @@ def task_reload_api_model(**kwargs):
 
 
 def branch_on_drift(**kwargs):
-    """
-    Branch on drift detected against OLD baselines.
-
-    drift_check ran before preprocess overwrote the baselines, so this
-    decision honestly reflects whether the ingested data differs from
-    the previously-trained model's expectations.
-
-    No more `fresh_upload` guard — the previous version silently skipped
-    retrain_notification on uploads, which made the Graph view lie about
-    what happened. Uploads of drifted data now correctly route through
-    retrain_notification (alert email fires) and the model is still
-    retrained on the new data downstream.
-    """
     ti = kwargs["ti"]
     drift_json = ti.xcom_pull(key="drift_result", task_ids="drift_check")
     if not drift_json:

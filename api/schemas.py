@@ -7,9 +7,7 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional
 
 
-# ---------------------------------------------------------------------------
 # Prediction
-# ---------------------------------------------------------------------------
 class SensorInput(BaseModel):
     """Single sensor reading for prediction."""
     model_config = ConfigDict(
@@ -48,9 +46,7 @@ class PredictionResponse(BaseModel):
     )
 
 
-# ---------------------------------------------------------------------------
 # Batch
-# ---------------------------------------------------------------------------
 class BatchInput(BaseModel):
     readings: list[SensorInput] = Field(..., min_length=1, max_length=10_000)
 
@@ -61,9 +57,7 @@ class BatchResponse(BaseModel):
     failures_detected: int
 
 
-# ---------------------------------------------------------------------------
 # System
-# ---------------------------------------------------------------------------
 class HealthResponse(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
@@ -73,9 +67,7 @@ class HealthResponse(BaseModel):
     uptime_seconds: float
 
 
-# ---------------------------------------------------------------------------
 # Drift
-# ---------------------------------------------------------------------------
 class DriftReport(BaseModel):
     overall_drift: bool
     n_drifted: int
@@ -85,18 +77,14 @@ class DriftReport(BaseModel):
     reference_type: str = "unknown" 
 
 
-# ---------------------------------------------------------------------------
 # Retrain
-# ---------------------------------------------------------------------------
 class RetrainResponse(BaseModel):
     status: str
     message: str
     triggered_by: Optional[str] = None
 
 
-# ---------------------------------------------------------------------------
 # Feedback loop (ground-truth)
-# ---------------------------------------------------------------------------
 class FeedbackInput(BaseModel):
     model_config = ConfigDict(
         protected_namespaces=(),
@@ -120,9 +108,7 @@ class FeedbackStats(BaseModel):
     window: int
 
 
-# ---------------------------------------------------------------------------
 # Upload & Retrain
-# ---------------------------------------------------------------------------
 class UploadRetrainResponse(BaseModel):
     status: str
     filename: str
@@ -144,9 +130,7 @@ class UploadListResponse(BaseModel):
     uploads: list[UploadedFile]
 
 
-# ---------------------------------------------------------------------------
 # Rollback
-# ---------------------------------------------------------------------------
 class RollbackRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
     target_version: Optional[str] = Field(

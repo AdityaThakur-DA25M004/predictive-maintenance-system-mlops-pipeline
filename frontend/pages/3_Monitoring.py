@@ -26,7 +26,7 @@ tab_model, tab_drift, tab_retrain, tab_alerts = st.tabs([
     "📈 Model Quality", "📉 Drift Detection", "🔁 Retrain", "🚨 Alerts",
 ])
 
-# ══ Model Quality ════════════════════════════════════════════════════════
+#  Model Quality 
 with tab_model:
     try:
         info = client.model_info()
@@ -366,7 +366,7 @@ with tab_retrain:
 
     st.divider()
 
-    # ── Manual retrain trigger (key only) ─────────────────────────────
+    #  Manual retrain trigger (key only) 
     st.markdown("##### ⚡ Manual Retrain Trigger (no file upload)")
     r1, r2 = st.columns([2, 3])
     with r1:
@@ -390,7 +390,7 @@ with tab_retrain:
 
     st.divider()
 
-    # ── Upload history ─────────────────────────────────────────────────
+    #  Upload history 
     st.markdown("##### 📁 Upload History")
     try:
         history = client.list_uploads()
@@ -430,7 +430,7 @@ with tab_retrain:
             st.button("🔢 Prometheus — offline", disabled=True, use_container_width=True,
                       help=f"{cfg.prometheus_internal_url} not reachable. Use Docker Compose to start Prometheus.")
 
-# ══ Alerts ════════════════════════════════════════════════════════════════
+#  Alerts 
 with tab_alerts:
     st.markdown("#### 🚨 System Alerts")
     st.caption(
@@ -466,7 +466,7 @@ with tab_alerts:
         except Exception:
             return []
 
-    # ── Headline counters ─────────────────────────────────────────────
+    #  Headline counters 
     c1, c2, c3, c4 = st.columns(4)
 
     drift_now = _prom_query("drift_detected")
@@ -488,7 +488,7 @@ with tab_alerts:
 
     st.markdown("---")
 
-    # ── Live firing alerts (from /api/v1/alerts) ──────────────────────
+    #  Live firing alerts (from /api/v1/alerts) 
     st.markdown("##### 🔥 Currently firing alerts")
     alerts = _prom_alerts()
     firing = [a for a in alerts if a.get("state") == "firing"]
@@ -522,7 +522,6 @@ with tab_alerts:
 
     st.markdown("---")
 
-    # ── Alert dispatch breakdown ──────────────────────────────────────
     st.markdown("##### 📬 Alert dispatches by type and channel (last 24h)")
     dispatched = _prom_query(
         "sum(increase(alert_notifications_total[24h])) by (alert_type, channel)"
@@ -545,7 +544,6 @@ with tab_alerts:
 
     st.markdown("---")
 
-    # ── Defined alert rules (helpful for users new to the system) ────
     st.markdown("##### 📋 Configured alert rules")
     with st.expander("View alert rule definitions", expanded=False):
         st.caption("These rules are defined in `monitoring/prometheus/alert_rules.yml`.")

@@ -1,15 +1,6 @@
 """
 Data Ingestion Module for Predictive Maintenance System.
 
-Handles loading raw data, schema validation, quality checks,
-and train/test splitting with stratification on the target.
-
-IMPORTANT — Note on leakage:
-The columns TWF, HDF, PWF, OSF, RNF are per-failure-mode flags that are
-deterministically set whenever `Machine failure = 1`. Including them as
-features would cause label leakage. This module drops them (and the
-identifier columns UDI / Product ID) from the saved train/test files so
-no downstream consumer accidentally uses them.
 """
 
 import os
@@ -26,9 +17,7 @@ logger = setup_logger(__name__)
 # Resolved once at import time; Airflow/API containers both set this env var.
 UPLOADS_DIR = os.environ.get("UPLOADS_DIR", "data/feedback/uploads")
 
-# ---------------------------------------------------------------------------
 # Schema
-# ---------------------------------------------------------------------------
 EXPECTED_SCHEMA = {
     "UDI": "int", "Product ID": "str", "Type": "str",
     "Air temperature [K]": "float", "Process temperature [K]": "float",
@@ -37,34 +26,19 @@ EXPECTED_SCHEMA = {
     "TWF": "int", "HDF": "int", "PWF": "int", "OSF": "int", "RNF": "int",
 }
 
-# These are optional — uploaded files often won't have them (they get dropped anyway)
 _OPTIONAL_COLS = {"UDI", "Product ID", "TWF", "HDF", "PWF", "OSF", "RNF"}
 
-# Columns removed to prevent label leakage and identifier noise
 LEAKY_FAILURE_MODE_COLS = ["TWF", "HDF", "PWF", "OSF", "RNF"]
 IDENTIFIER_COLS = ["UDI", "Product ID"]
 
 
 import re
 
-# Regex to extract the unix timestamp embedded in API-generated upload filenames.
-# Matches:  upload_<unix_timestamp>_<original_stem>.csv
-# (See main.py @app.post("/retrain/upload") — the API names files this way.)
 _UPLOAD_FILENAME_RE = re.compile(r"^upload_(\d+)_")
 
 
 def _upload_sort_key(path: Path) -> tuple[int, float]:
-    """
-    Return a sort key for an uploaded file. Higher = more recent.
 
-    Primary key: timestamp embedded in the filename by the API at upload time.
-    Fallback:    file mtime (for legacy files that don't follow the convention).
-
-    Why not just mtime? Docker named volumes + Windows-host bind mounts can
-    report stale mtimes after container restarts or `docker compose down`.
-    The filename timestamp is set ONCE by the API and never changes, so it
-    is the single source of truth for upload order.
-    """
     m = _UPLOAD_FILENAME_RE.match(path.name)
     if m:
         return (int(m.group(1)), path.stat().st_mtime)
@@ -74,14 +48,7 @@ def _upload_sort_key(path: Path) -> tuple[int, float]:
 
 
 def get_latest_upload(uploads_dir: str | None = None) -> str | None:
-    """
-    Return the path to the most-recently uploaded CSV in the uploads directory,
-    or None if no uploads exist yet.
 
-    "Most recent" is determined by the unix timestamp embedded in the filename
-    (set by the API at upload time), NOT by filesystem mtime — which can be
-    unreliable across Docker volumes and host filesystems.
-    """
     dir_path = Path(uploads_dir or UPLOADS_DIR)
     if not dir_path.exists():
         return None
@@ -113,14 +80,7 @@ def load_raw_data(filepath: str) -> pd.DataFrame:
 
 
 def validate_schema(df: pd.DataFrame) -> bool:
-    """
-    Validate required columns.
 
-    Core columns (Type, temperatures, RPM, torque, tool wear, Machine failure)
-    are always required.  Optional columns (UDI, Product ID, TWF/HDF/PWF/OSF/RNF)
-    are allowed to be absent — they are dropped before training anyway, so
-    user-uploaded files that omit them will still pass validation.
-    """
     all_expected = set(EXPECTED_SCHEMA.keys())
     missing = all_expected - set(df.columns)
     critical_missing = missing - _OPTIONAL_COLS
@@ -136,7 +96,6 @@ def validate_schema(df: pd.DataFrame) -> bool:
 
 
 def validate_data_quality(df: pd.DataFrame) -> dict:
-    """Run data quality checks and return a report."""
     report = {
         "total_rows": int(len(df)),
         "total_columns": int(len(df.columns)),
@@ -172,13 +131,7 @@ def validate_data_quality(df: pd.DataFrame) -> dict:
 
 
 def drop_leaky_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Remove identifier and failure-mode indicator columns.
 
-    Failure-mode columns (TWF/HDF/PWF/OSF/RNF) are deterministically set
-    whenever Machine failure == 1, so including them as features would
-    leak the label. Identifiers (UDI, Product ID) carry no signal.
-    """
     to_drop = [c for c in LEAKY_FAILURE_MODE_COLS + IDENTIFIER_COLS if c in df.columns]
     if to_drop:
         df = df.drop(columns=to_drop)
@@ -200,15 +153,7 @@ def split_data(df: pd.DataFrame, test_size: float = 0.2,
 
 
 def run_ingestion(config: dict | None = None) -> dict:
-    """Execute the full ingestion pipeline.
 
-    Data source priority:
-      1. Latest CSV in UPLOADS_DIR  (set by API when user uploads a file)
-      2. Default raw path from config  (data/raw/ai4i2020.csv)
-
-    The chosen path is stored in the return dict as ``data_source`` so the
-    Airflow DAG can surface it in XCom and logs.
-    """
     if config is None:
         config = load_config()
 
@@ -216,7 +161,7 @@ def run_ingestion(config: dict | None = None) -> dict:
     processed_dir = str(root / config["data"]["processed_dir"])
     ensure_dir(processed_dir)
 
-    # ── Data source selection ──────────────────────────────────────────
+    #  Data source selection 
     uploaded = get_latest_upload()
     if uploaded:
         raw_path = uploaded

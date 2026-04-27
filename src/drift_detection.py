@@ -1,18 +1,5 @@
 """
 Drift Detection Module for Predictive Maintenance System.
-
-KEY FIX (vs previous version)
------------------------------
-Previously the KS test compared current data against synthetic samples drawn
-from N(baseline_mean, baseline_std). For non-Gaussian features
-(`type_encoded`, `tool_wear`, engineered ratios, …) that synthetic reference
-diverges from the real distribution and the KS test reports drift on every
-run — even when comparing the data against itself.
-
-The fix: persist a real sample of training-time feature values in
-`ref_samples.json` (written by run_preprocessing) and use those samples as
-the KS / PSI reference. Falls back to the old synthetic behaviour if no
-ref_samples file is found, so the change is fully backward-compatible.
 """
 
 import os
@@ -109,18 +96,6 @@ def detect_drift(
     ref_samples: dict | None = None,
     baselines_path: str | None = None,
 ) -> dict:
-    """
-    Compare `current_data` against training baselines/reference samples.
-
-    Args:
-        current_data:     DataFrame to test (post feature-engineering).
-        baselines:        dict of per-feature stats (from compute_drift_baselines).
-        feature_cols:     features to check.
-        ks_threshold:     p-value threshold (drift if p < threshold).
-        psi_threshold:    PSI threshold (drift if PSI > threshold).
-        ref_samples:      Optional pre-loaded reference samples.
-        baselines_path:   Optional path; used to auto-discover ref_samples.json.
-    """
     # Auto-load reference samples if caller didn't pass them
     if ref_samples is None:
         rs_path = _resolve_ref_samples_path(baselines_path)
@@ -206,21 +181,7 @@ def check_drift_from_file(data_path: str, baselines_path: str,
     )
 
 if __name__ == "__main__":
-    """
-    Standalone entry point used by:
-      - `python -m src.drift_detection`
-      - DVC stage `drift_check` in dvc.yaml
-      - MLflow project entry point `drift_check` in MLproject
- 
-    Reads the processed test set, engineers features, compares against
-    the existing drift baselines on disk, and writes:
-      - data/baselines/drift_report.json   (full detail; tracked as DVC `outs`)
-      - data/baselines/drift_summary.json  (flat summary; tracked as DVC `metrics`)
- 
-    First-run behaviour: if no baselines exist yet (preprocessing has
-    never run), this writes empty-but-valid versions of both files so
-    DVC doesn't fail. Subsequent runs will produce a real comparison.
-    """
+
     import json
     from src.utils import load_config, get_project_root, ensure_dir
     from src.data_preprocessing import engineer_features, get_feature_columns
@@ -236,15 +197,6 @@ if __name__ == "__main__":
  
  
     def _write_summary(report: dict) -> dict:
-        """
-        Extract a FLAT top-level summary from a detailed drift report.
- 
-        Why flat: `dvc metrics show` recursively expands nested dicts
-        into one row per leaf, which makes a per-feature drift report
-        unreadable. A flat summary surfaces only what you actually want
-        to track over time: did drift happen, how many features, what
-        proportion, what reference was used.
-        """
         n_total = int(report.get("total_features_checked", 0)) or 0
         n_drifted = int(report.get("n_drifted", 0)) or 0
         summary = {

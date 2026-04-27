@@ -1,21 +1,4 @@
-# ============================================================
 # DVC Pipeline Definition — predictive maintenance
-# ============================================================
-# Both configs/config.yaml AND configs/config.local.yaml are listed
-# as deps on every stage. The Python code reads only ONE of them at
-# runtime (driven by PM_CONFIG_PATH env var), but DVC needs to track
-# both files so editing either one triggers the right re-runs:
-#
-#   - In Docker:        config.local.yaml is unchanged, config.yaml drives
-#   - Locally:          config.yaml is unchanged, config.local.yaml drives
-#   - Either way:       DVC notices when EITHER file changes
-#
-# Listing both as deps doesn't cause spurious re-runs — DVC checks
-# content hashes, so a file you didn't edit just keeps its old hash.
-#
-# Pipeline stages (matches the Airflow DAG order):
-#   data_ingestion → drift_check → preprocessing → training
-# ============================================================
 
 stages:
   data_ingestion:
@@ -31,28 +14,6 @@ stages:
       - data/processed/train.csv
       - data/processed/test.csv
 
-  # NEW: Runs BEFORE preprocessing so it compares the freshly-ingested
-  # data against the PREVIOUS baselines on disk. After preprocessing
-  # overwrites the baselines, this comparison is no longer meaningful —
-  # which is exactly why drift_check has to run first. Mirrors the
-  # ordering fix in ml_pipeline_dag.py.
-  #
-  # TWO output files (deliberate split):
-  #
-  #   - drift_report.json   (under `outs`):
-  #       Full per-feature detail (10 features × 10 sub-metrics).
-  #       Versioned via DVC cache. NOT surfaced as a metric because
-  #       `dvc metrics show` flattens nested JSON and would print 100+
-  #       rows of unreadable output.
-  #
-  #   - drift_summary.json  (under `metrics`, cache: false):
-  #       Flat 5-key summary (overall_drift, n_drifted, n_total_features,
-  #       drift_pct, reference_type). Surfaces cleanly in
-  #       `dvc metrics show` and `dvc metrics diff`.
-  #
-  # The same physical file cannot appear under both `outs` and `metrics`
-  # in the same stage (DVC raises "already specified in stage"), which
-  # is why we write two physical files instead.
   drift_check:
     cmd: python -m src.drift_detection
     deps:

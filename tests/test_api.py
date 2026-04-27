@@ -33,7 +33,7 @@ def sample_reading():
     }
 
 
-# ── System endpoints ──────────────────────────────────────────────────────
+# ── System endpoints   
 class TestHealthEndpoints:
     def test_health_returns_200(self, client):
         resp = client.get("/health")
@@ -66,7 +66,7 @@ class TestHealthEndpoints:
         assert "model_version" in data
 
 
-# ── Prediction endpoints ─────────────────────────────────────────────────
+# ── Prediction endpoints 
 class TestPredictEndpoint:
     def test_predict_valid_input(self, client, sample_reading):
         if _state["model"] is None:
@@ -112,7 +112,7 @@ class TestBatchEndpoint:
         assert resp.status_code == 422
 
 
-# ── Feedback loop endpoints ───────────────────────────────────────────────
+# ── Feedback loop endpoints 
 class TestFeedbackEndpoints:
     def test_feedback_submit_valid(self, client, sample_reading):
         if _state["model"] is None:
@@ -149,7 +149,7 @@ class TestFeedbackEndpoints:
         assert isinstance(data["total_feedback"], int)
 
 
-# ── Retrain endpoint (auth) ──────────────────────────────────────────────
+# ── Retrain endpoint (auth) 
 class TestRetrainEndpoint:
     def test_retrain_without_api_key(self, client):
         resp = client.post("/retrain", params={"reason": "manual"})
@@ -164,22 +164,6 @@ class TestRetrainEndpoint:
         assert resp.status_code == 401
 
     def test_retrain_with_valid_key(self, client):
-        """
-        With a valid API key, /retrain should accept the request and
-        return a contract-valid status.
- 
-        Two valid statuses depending on environment:
-          - 'triggered' : Airflow creds set AND DAG was actually started
-          - 'partial'   : Auth/logging/alert path succeeded, but
-                           Airflow trigger was skipped because
-                           AIRFLOW_USERNAME / AIRFLOW_PASSWORD aren't
-                           configured (normal in unit-test environments)
- 
-        Either is correct; both prove the endpoint authorized the
-        request and went through the success branch. The
-        environment-specific "did Airflow actually start a run" check
-        is integration-test territory, not unit-test territory.
-        """
         resp = client.post(
             "/retrain",
             params={"reason": "manual"},
@@ -194,7 +178,7 @@ class TestRetrainEndpoint:
         assert data["triggered_by"] == "manual"
 
 
-# ── Metrics endpoint ─────────────────────────────────────────────────────
+# ── Metrics endpoint 
 class TestMetricsEndpoint:
     def test_prometheus_metrics(self, client):
         resp = client.get("/metrics")

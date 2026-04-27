@@ -12,10 +12,6 @@ files for the environment you're running in:
   * ``PM_CONFIG_PATH``  — path to the YAML config file
                           (default: ``configs/config.yaml``, again Docker-flavoured)
 
-In Docker, neither variable is set and defaults kick in. When running
-locally, the ``scripts/activate-local.ps1`` helper sets them to point at
-``.env.local`` and ``configs/config.local.yaml`` respectively. Nothing
-breaks if both are absent — the module falls back to existing behaviour.
 """
 
 import os
@@ -103,23 +99,7 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
 # Configuration
 # ---------------------------------------------------------------------------
 def load_config(config_path: str | None = None) -> dict:
-    """
-    Load YAML configuration from disk.
 
-    Resolution order:
-      1. Explicit ``config_path`` argument (highest priority)
-      2. ``PM_CONFIG_PATH`` env var (set by activate-local.ps1)
-      3. ``configs/config.yaml`` in the project root (Docker default)
-
-    Args:
-        config_path: Optional override path.
-
-    Returns:
-        Dictionary of configuration values.
-
-    Raises:
-        FileNotFoundError: If the resolved config file does not exist.
-    """
     if config_path is None:
         config_path = os.environ.get(
             "PM_CONFIG_PATH",
