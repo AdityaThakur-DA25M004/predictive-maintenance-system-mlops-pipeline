@@ -1,7 +1,43 @@
 """
 Airflow DAG for the Predictive Maintenance ML Pipeline.
 
-Orchestrates: ingest → preprocess → train → drift check → branch
+Orchestrates: ingest → drift_check → preprocess → train → branch
+
+KEY ARCHITECTURE FIX (this version)
+-----------------------------------
+drift_check now runs BEFORE preprocessing.
+
+Why? Preprocessing overwrites drift_baselines.json + ref_samples.json
+from the *current* training data on every run. The previous DAG order
+(ingest → preprocess → drift_check) made drift_check compare the new
+data against baselines that had ALREADY been derived from that same
+data — so drift_check could never detect anything, and the
+retrain_notification branch was always silently skipped.
+
+NEW order: ingest → drift_check (against OLD baselines) → preprocess
+(writes NEW baselines) → reload_api_baselines → train → reload_api_model
+→ drift_branch.
+
+This means:
+  * On a regular daily run with the default dataset and no drift,
+    drift_check reads the previous baselines (which match the default
+    dataset) → no drift → no_drift_end.
+  * On an upload of a drifted dataset, drift_check reads the old
+    baselines from a previous train → drift IS detected → branches to
+    retrain_notification → email fires → pipeline_end.
+  * Either way, training and the API hot-reload still happen so the
+    model adapts to the new data. The branch decision now honestly
+    reflects what the new data looks like vs what the model knew.
+
+The `fresh_upload` guard from the previous version is REMOVED — it was
+dead code anyway (drift was never True due to baseline overwrite), and
+its existence was misleading the Airflow Graph view to show no_drift_end
+on uploads where drift was clearly present.
+
+First-run safeguard: if drift_baselines.json doesn't exist yet (very
+first DAG run before preprocess has ever populated it), drift_check
+returns overall_drift=False with reference_type="first_run_no_baseline"
+so the DAG doesn't fail.
 """
 
 from datetime import datetime, timedelta
@@ -48,6 +84,70 @@ def task_data_ingestion(**kwargs):
     return result["status"]
 
 
+def task_drift_check(**kwargs):
+    """
+    Drift check using OLD baselines (this task runs BEFORE preprocess).
+
+    The processed test.csv produced by ingest is the new data; the
+    drift_baselines.json on disk still reflects the previous training
+    run. So this comparison answers: "does the freshly-ingested data
+    differ from what the currently-deployed model was trained on?"
+
+    First-run safeguard: if no baselines exist yet, skip drift detection
+    rather than failing the DAG. preprocess will create them downstream.
+    """
+    import pandas as pd
+    from src.data_preprocessing import engineer_features, get_feature_columns
+    from src.drift_detection import detect_drift
+    from src.utils import load_config, get_project_root, load_json
+
+    config = load_config()
+    root = get_project_root()
+    data_path = os.path.join(str(root), config["data"]["processed_dir"], "test.csv")
+    baselines_path = os.path.join(str(root), config["data"]["baselines_path"])
+
+    if not os.path.exists(baselines_path):
+        logger.info(
+            f"No baselines at {baselines_path} — first DAG run. "
+            f"Skipping drift detection; preprocess will create baselines downstream."
+        )
+        kwargs["ti"].xcom_push(key="drift_result", value=json.dumps({
+            "overall_drift": False,
+            "n_drifted": 0,
+            "drifted_features": [],
+            "reference_type": "first_run_no_baseline",
+        }))
+        return {
+            "overall_drift": False,
+            "n_drifted": 0,
+            "drifted_features": [],
+            "reference_type": "first_run_no_baseline",
+        }
+
+    df = pd.read_csv(data_path)
+    df = engineer_features(df)
+    feature_cols = get_feature_columns()
+    baselines = load_json(baselines_path)
+
+    # Pass baselines_path so detect_drift can find ref_samples.json (also pre-overwrite)
+    report = detect_drift(
+        df, baselines, feature_cols, baselines_path=baselines_path
+    )
+
+    logger.info(
+        f"Drift check ({report.get('reference_type', 'unknown')}): "
+        f"{report['n_drifted']} of {len(feature_cols)} features drifted | "
+        f"overall_drift={report['overall_drift']}"
+    )
+    kwargs["ti"].xcom_push(key="drift_result", value=json.dumps({
+        "overall_drift": report["overall_drift"],
+        "n_drifted": report["n_drifted"],
+        "drifted_features": report["drifted_features"],
+        "reference_type": report.get("reference_type", "unknown"),
+    }))
+    return report
+
+
 def task_preprocessing(**kwargs):
     from src.data_preprocessing import run_preprocessing
     result = run_preprocessing()
@@ -73,7 +173,6 @@ def task_model_training(**kwargs):
         f"duration={duration_s:.0f}s"
     )
 
-    # Send training-complete alert (email/log) — non-fatal
     try:
         from src.alert_notifier import send_training_complete_alert
         send_training_complete_alert(
@@ -97,48 +196,93 @@ def task_model_training(**kwargs):
     return result["status"]
 
 
-def task_drift_check(**kwargs):
-    import pandas as pd
-    from src.data_preprocessing import engineer_features, get_feature_columns
-    from src.drift_detection import detect_drift
-    from src.utils import load_config, get_project_root, load_json
+def _call_api_reload(endpoint: str, params: dict | None = None) -> str:
+    """Best-effort POST to one of the API's /admin/reload-* endpoints."""
+    import requests
+    api_url = os.environ.get("API_INTERNAL_URL", "http://api:8000")
+    api_key = os.environ.get("RETRAIN_API_KEY", "")
+    if not api_key:
+        logger.warning(f"RETRAIN_API_KEY not set in Airflow env — skipping {endpoint}")
+        return "skipped"
+    try:
+        r = requests.post(
+            f"{api_url}{endpoint}",
+            headers={"X-API-Key": api_key},
+            params=params or {},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            logger.info(f"API {endpoint} OK: {r.json()}")
+            return "reloaded"
+        logger.warning(f"API {endpoint} non-200: {r.status_code} {r.text[:200]}")
+        return f"non_200_{r.status_code}"
+    except Exception as e:
+        logger.warning(f"Could not reach API {endpoint} (non-fatal): {e}")
+        return "unreachable"
 
-    config = load_config()
-    root = get_project_root()
-    data_path = os.path.join(str(root), config["data"]["processed_dir"], "test.csv")
-    baselines_path = os.path.join(str(root), config["data"]["baselines_path"])
 
-    df = pd.read_csv(data_path)
-    df = engineer_features(df)
-    feature_cols = get_feature_columns()
-    baselines = load_json(baselines_path)
-    report = detect_drift(df, baselines, feature_cols)
+def task_reload_api_baselines(**kwargs):
+    """Hot-reload drift_baselines.json + ref_samples.json into the live API."""
+    return _call_api_reload("/admin/reload-baselines")
 
-    logger.info(f"Drift check: {report['n_drifted']} features drifted")
-    kwargs["ti"].xcom_push(key="drift_result", value=json.dumps({
-        "overall_drift": report["overall_drift"],
-        "n_drifted": report["n_drifted"],
-        "drifted_features": report["drifted_features"],
-    }))
-    return report
+
+def task_reload_api_model(**kwargs):
+    """Hot-reload best_model.joblib + scaler.joblib + test_metrics.json into the live API."""
+    import json as _json
+    ti = kwargs["ti"]
+    training_json = ti.xcom_pull(key="training_result", task_ids="model_training")
+    data_source = "unknown"
+    if training_json:
+        try:
+            data_source = _json.loads(training_json).get("data_source", "unknown")
+        except Exception:
+            pass
+    return _call_api_reload(
+        "/admin/reload-model",
+        params={"data_source": data_source},
+    )
 
 
 def branch_on_drift(**kwargs):
+    """
+    Branch on drift detected against OLD baselines.
+
+    drift_check ran before preprocess overwrote the baselines, so this
+    decision honestly reflects whether the ingested data differs from
+    the previously-trained model's expectations.
+
+    No more `fresh_upload` guard — the previous version silently skipped
+    retrain_notification on uploads, which made the Graph view lie about
+    what happened. Uploads of drifted data now correctly route through
+    retrain_notification (alert email fires) and the model is still
+    retrained on the new data downstream.
+    """
     ti = kwargs["ti"]
     drift_json = ti.xcom_pull(key="drift_result", task_ids="drift_check")
     if not drift_json:
         logger.warning("drift_result XCom is empty — defaulting to no_drift_end")
         return "no_drift_end"
     drift = json.loads(drift_json)
+
     if drift["overall_drift"]:
-        logger.warning("Drift detected — branching to retraining path")
+        logger.warning(
+            f"Drift detected in {drift['n_drifted']} features: "
+            f"{drift['drifted_features']} — branching to retrain_notification"
+        )
         return "retrain_notification"
-    else:
-        logger.info("No drift — pipeline complete")
-        return "no_drift_end"
+
+    logger.info(
+        f"No drift detected (reference_type={drift.get('reference_type', 'unknown')}) "
+        f"— branching to no_drift_end"
+    )
+    return "no_drift_end"
 
 
 def task_retrain_notification(**kwargs):
+    """
+    Send drift + retrain alerts. Uses the real data_source from ingestion
+    XCom (uploaded vs default) so emails are accurate.
+    """
     ti = kwargs["ti"]
     drift_json = ti.xcom_pull(key="drift_result", task_ids="drift_check")
     if not drift_json:
@@ -146,6 +290,15 @@ def task_retrain_notification(**kwargs):
         return "retrain_triggered"
     drift = json.loads(drift_json)
     logger.warning(f"RETRAINING RECOMMENDED: Drift in features: {drift['drifted_features']}")
+
+    # Pull the actual data source (uploaded vs default) for accurate alerting
+    ingestion_json = ti.xcom_pull(key="ingestion_result", task_ids="data_ingestion")
+    data_source = "unknown"
+    if ingestion_json:
+        try:
+            data_source = json.loads(ingestion_json).get("data_source", "unknown")
+        except Exception:
+            pass
 
     # Alert 1: drift detected
     try:
@@ -160,7 +313,7 @@ def task_retrain_notification(**kwargs):
         send_retrain_alert(
             reason="drift_detected",
             triggered_by="airflow",
-            data_source="unknown",   # will be known after ingestion runs
+            data_source=data_source,
         )
     except Exception as e:
         logger.warning(f"Retrain alert failed (non-fatal): {e}")
@@ -177,10 +330,14 @@ with DAG(
     tags=["ml", "predictive-maintenance", "mlops"],
 ) as dag:
 
-    # NOTE: provide_context is removed — it's automatic in Airflow 2.x
     ingest = PythonOperator(
         task_id="data_ingestion",
         python_callable=task_data_ingestion,
+    )
+
+    drift = PythonOperator(
+        task_id="drift_check",
+        python_callable=task_drift_check,
     )
 
     preprocess = PythonOperator(
@@ -188,14 +345,21 @@ with DAG(
         python_callable=task_preprocessing,
     )
 
+    reload_api = PythonOperator(
+        task_id="reload_api_baselines",
+        python_callable=task_reload_api_baselines,
+        retries=0,
+    )
+
     train = PythonOperator(
         task_id="model_training",
         python_callable=task_model_training,
     )
 
-    drift = PythonOperator(
-        task_id="drift_check",
-        python_callable=task_drift_check,
+    reload_api_model = PythonOperator(
+        task_id="reload_api_model",
+        python_callable=task_reload_api_model,
+        retries=0,
     )
 
     branch = BranchPythonOperator(
@@ -215,6 +379,13 @@ with DAG(
         trigger_rule="none_failed_min_one_success",
     )
 
-    ingest >> preprocess >> train >> drift >> branch
+    # NEW pipeline order:
+    #   ingest → drift_check (against OLD baselines)
+    #          → preprocess (writes NEW baselines)
+    #          → reload_api_baselines (hot-reload baselines into live API)
+    #          → train (on new data)
+    #          → reload_api_model (hot-reload model so Grafana panels update)
+    #          → drift_branch (uses drift_check XCom from earlier)
+    ingest >> drift >> preprocess >> reload_api >> train >> reload_api_model >> branch
     branch >> [retrain_notify, no_drift]
     [retrain_notify, no_drift] >> pipeline_end

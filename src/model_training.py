@@ -119,6 +119,88 @@ def train_model(
     experiment_name = config["mlflow"]["experiment_name"]
 
     mlflow.set_tracking_uri(mlflow_uri)
+
+    # ── FIX: Self-healing experiment setup ───────────────────────────────
+    # If MLflow auto-creates an experiment without an explicit
+    # artifact_location, it falls back to a local path (file:///mlflow).
+    # Clients then try to mkdir /mlflow on their OWN container → PermissionError.
+    #
+    # MLflow makes artifact_location IMMUTABLE — there is no API to change
+    # it on an existing experiment. So if we find one in the bad state,
+    # the only fix is to rename it out of the way and create a fresh
+    # experiment with the correct artifact_location='mlflow-artifacts:/'
+    # (which routes uploads through the MLflow server's --serve-artifacts
+    # proxy, so artifacts live on the server side only).
+    # ─────────────────────────────────────────────────────────────────────
+    from mlflow.tracking import MlflowClient
+    _client = MlflowClient(tracking_uri=mlflow_uri)
+    _existing = _client.get_experiment_by_name(experiment_name)
+
+    def _is_http_artifact_loc(loc: str) -> bool:
+        """True iff artifact_location uses HTTP-proxied storage."""
+        return bool(loc) and loc.startswith("mlflow-artifacts:")
+
+    def _create_fresh_experiment() -> str:
+        new_id = _client.create_experiment(
+            experiment_name,
+            artifact_location="mlflow-artifacts:/",
+        )
+        logger.info(
+            f"Created MLflow experiment '{experiment_name}' (id={new_id}) "
+            f"with artifact_location='mlflow-artifacts:/' (HTTP proxy)"
+        )
+        return new_id
+
+    if _existing is None:
+        # Clean slate — first run.
+        _create_fresh_experiment()
+
+    elif _existing.lifecycle_stage == "deleted":
+        # Soft-deleted with the same name. Restore if it's already correct;
+        # otherwise archive it out of the way and create a fresh one.
+        if _is_http_artifact_loc(_existing.artifact_location):
+            _client.restore_experiment(_existing.experiment_id)
+            logger.info(f"Restored soft-deleted experiment '{experiment_name}'")
+        else:
+            _archive_name = f"{experiment_name}_archived_{int(_time.time())}"
+            _client.rename_experiment(_existing.experiment_id, _archive_name)
+            _create_fresh_experiment()
+            logger.warning(
+                f"Soft-deleted experiment '{experiment_name}' had bad "
+                f"artifact_location='{_existing.artifact_location}'. "
+                f"Renamed to '{_archive_name}' and created a fresh one."
+            )
+
+    elif not _is_http_artifact_loc(_existing.artifact_location):
+        # ── AUTO-HEAL ───────────────────────────────────────────────────
+        # Live experiment exists with a local-filesystem artifact_location
+        # (typically file:///mlflow from a pre-fix run). Clients writing
+        # artifacts to it WILL fail with PermissionError.
+        # Rename the old one to keep its run history accessible under a
+        # new name, then create a fresh experiment under the original name.
+        # ────────────────────────────────────────────────────────────────
+        _bad_loc = _existing.artifact_location
+        _archive_name = f"{experiment_name}_archived_{int(_time.time())}"
+        try:
+            _client.rename_experiment(_existing.experiment_id, _archive_name)
+            _create_fresh_experiment()
+            logger.warning(
+                f"AUTO-HEALED MLflow state: experiment '{experiment_name}' had "
+                f"artifact_location='{_bad_loc}' (would cause PermissionError). "
+                f"Old experiment archived as '{_archive_name}' and a fresh one "
+                f"created with HTTP artifact storage. Old run history is still "
+                f"accessible in the MLflow UI under the archived name."
+            )
+        except Exception as _heal_err:
+            logger.error(
+                f"AUTO-HEAL FAILED while fixing experiment '{experiment_name}' "
+                f"(artifact_location='{_bad_loc}'): {_heal_err}. "
+                f"Run scripts/reset_mlflow.ps1 manually to wipe the MLflow DB."
+            )
+            raise
+
+    # If _existing has correct artifact_location, fall through unchanged.
+
     mlflow.set_experiment(experiment_name)
 
     logger.info(f"MLflow tracking URI: {mlflow_uri}")

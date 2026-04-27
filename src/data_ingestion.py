@@ -45,14 +45,42 @@ LEAKY_FAILURE_MODE_COLS = ["TWF", "HDF", "PWF", "OSF", "RNF"]
 IDENTIFIER_COLS = ["UDI", "Product ID"]
 
 
+import re
+
+# Regex to extract the unix timestamp embedded in API-generated upload filenames.
+# Matches:  upload_<unix_timestamp>_<original_stem>.csv
+# (See main.py @app.post("/retrain/upload") — the API names files this way.)
+_UPLOAD_FILENAME_RE = re.compile(r"^upload_(\d+)_")
+
+
+def _upload_sort_key(path: Path) -> tuple[int, float]:
+    """
+    Return a sort key for an uploaded file. Higher = more recent.
+
+    Primary key: timestamp embedded in the filename by the API at upload time.
+    Fallback:    file mtime (for legacy files that don't follow the convention).
+
+    Why not just mtime? Docker named volumes + Windows-host bind mounts can
+    report stale mtimes after container restarts or `docker compose down`.
+    The filename timestamp is set ONCE by the API and never changes, so it
+    is the single source of truth for upload order.
+    """
+    m = _UPLOAD_FILENAME_RE.match(path.name)
+    if m:
+        return (int(m.group(1)), path.stat().st_mtime)
+    # Files without the upload_<ts>_ prefix sort BEFORE proper uploads (ts=0),
+    # falling back to mtime as a last-resort tiebreaker.
+    return (0, path.stat().st_mtime)
+
+
 def get_latest_upload(uploads_dir: str | None = None) -> str | None:
     """
-    Return the path to the most-recently modified CSV in the uploads directory,
+    Return the path to the most-recently uploaded CSV in the uploads directory,
     or None if no uploads exist yet.
 
-    This is the hook that makes retrain-with-upload work: data_ingestion
-    checks here first, so the entire downstream pipeline (preprocess → train)
-    automatically operates on the new data.
+    "Most recent" is determined by the unix timestamp embedded in the filename
+    (set by the API at upload time), NOT by filesystem mtime — which can be
+    unreliable across Docker volumes and host filesystems.
     """
     dir_path = Path(uploads_dir or UPLOADS_DIR)
     if not dir_path.exists():
@@ -60,8 +88,14 @@ def get_latest_upload(uploads_dir: str | None = None) -> str | None:
     files = list(dir_path.glob("*.csv"))
     if not files:
         return None
-    latest = max(files, key=lambda f: f.stat().st_mtime)
-    logger.info(f"[UPLOAD] Latest uploaded dataset: {latest}")
+    latest = max(files, key=_upload_sort_key)
+    # Log enough context to diagnose future selection issues
+    sort_key = _upload_sort_key(latest)
+    logger.info(
+        f"[UPLOAD] Latest uploaded dataset: {latest} "
+        f"(filename_ts={sort_key[0]}, mtime={sort_key[1]:.0f}, "
+        f"total_uploads={len(files)})"
+    )
     return str(latest)
 
 

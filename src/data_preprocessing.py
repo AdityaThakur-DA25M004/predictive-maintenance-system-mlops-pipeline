@@ -3,6 +3,13 @@ Data Preprocessing & Feature Engineering Module.
 
 Handles cleaning, transformation, feature creation, scaling,
 and computation of drift baselines.
+
+KEY ADDITION (vs previous version)
+----------------------------------
+Persist a real sample of training-time feature values as
+`<baselines_dir>/ref_samples.json`. This lets drift_detection.detect_drift
+compare incoming data against an actual empirical distribution rather than
+a synthetic Gaussian, which fixes the false-positive drift on retrain.
 """
 
 import os
@@ -19,6 +26,11 @@ from src.utils import setup_logger, load_config, get_project_root, ensure_dir, s
 logger = setup_logger(__name__)
 
 
+# Maximum reference samples to persist per feature. 2000 is plenty for KS/PSI
+# while keeping the JSON file under a few MB.
+REF_SAMPLE_SIZE = int(os.environ.get("DRIFT_REF_SAMPLE_SIZE", "2000"))
+
+
 # ---------------------------------------------------------------------------
 # Feature Engineering
 # ---------------------------------------------------------------------------
@@ -32,28 +44,14 @@ def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         - wear_degree: Interaction of tool wear and torque.
         - type_encoded: Label-encoded product type (H=0, L=1, M=2).
         - speed_torque_ratio: Rotational speed / Torque.
-
-    Args:
-        df: DataFrame with raw features.
-
-    Returns:
-        DataFrame with added engineered features.
     """
     df = df.copy()
 
-    # Temperature difference
     df["temp_diff"] = df["Process temperature [K]"] - df["Air temperature [K]"]
-
-    # Power approximation (torque × angular velocity)
     df["power"] = df["Torque [Nm]"] * df["Rotational speed [rpm]"] * (2 * np.pi / 60)
-
-    # Wear-torque interaction
     df["wear_degree"] = df["Tool wear [min]"] * df["Torque [Nm]"]
-
-    # Speed-to-torque ratio
     df["speed_torque_ratio"] = df["Rotational speed [rpm]"] / (df["Torque [Nm]"] + 1e-6)
 
-    # Encode product type
     type_map = {"H": 0, "L": 1, "M": 2}
     df["type_encoded"] = df["Type"].map(type_map)
 
@@ -82,17 +80,7 @@ def get_feature_columns() -> list[str]:
 # ---------------------------------------------------------------------------
 def fit_scaler(df: pd.DataFrame, feature_cols: list[str],
                save_path: str | None = None) -> StandardScaler:
-    """
-    Fit a StandardScaler on the training data.
-
-    Args:
-        df: Training DataFrame.
-        feature_cols: Columns to scale.
-        save_path: Optional path to persist the scaler.
-
-    Returns:
-        Fitted StandardScaler.
-    """
+    """Fit a StandardScaler on the training data."""
     scaler = StandardScaler()
     scaler.fit(df[feature_cols])
     logger.info(f"Scaler fitted on {len(feature_cols)} features")
@@ -107,17 +95,7 @@ def fit_scaler(df: pd.DataFrame, feature_cols: list[str],
 
 def apply_scaler(df: pd.DataFrame, feature_cols: list[str],
                  scaler: StandardScaler) -> pd.DataFrame:
-    """
-    Apply a fitted scaler to the DataFrame.
-
-    Args:
-        df: DataFrame to transform.
-        feature_cols: Columns to scale.
-        scaler: Fitted StandardScaler.
-
-    Returns:
-        DataFrame with scaled feature columns.
-    """
+    """Apply a fitted scaler to the DataFrame."""
     df = df.copy()
     df[feature_cols] = scaler.transform(df[feature_cols])
     return df
@@ -127,19 +105,7 @@ def apply_scaler(df: pd.DataFrame, feature_cols: list[str],
 # Drift Baselines
 # ---------------------------------------------------------------------------
 def compute_drift_baselines(df: pd.DataFrame, feature_cols: list[str]) -> dict:
-    """
-    Compute statistical baselines for drift detection.
-
-    For each feature, computes mean, std, min, max, median,
-    25th/75th percentiles, skewness, and kurtosis.
-
-    Args:
-        df: Training DataFrame (before scaling).
-        feature_cols: Feature columns to baseline.
-
-    Returns:
-        Dictionary mapping feature names to their statistics.
-    """
+    """Compute per-feature statistical baselines (mean/std/quantiles/etc)."""
     baselines = {}
     for col in feature_cols:
         series = df[col].dropna()
@@ -159,6 +125,26 @@ def compute_drift_baselines(df: pd.DataFrame, feature_cols: list[str]) -> dict:
     return baselines
 
 
+def compute_reference_samples(df: pd.DataFrame, feature_cols: list[str],
+                              n_samples: int = REF_SAMPLE_SIZE,
+                              random_state: int = 42) -> dict:
+    """
+    Return a dict {feature_name: [list of float values]} sampled from the
+    training data. These are used by drift_detection.detect_drift as the
+    real reference distribution for the KS test (instead of a synthetic
+    Gaussian).
+    """
+    n = min(n_samples, len(df))
+    sample_df = df[feature_cols].dropna().sample(
+        n=n, random_state=random_state, replace=False
+    )
+    ref = {col: sample_df[col].astype(float).tolist() for col in feature_cols}
+    logger.info(
+        f"Reference samples prepared: {n} rows × {len(feature_cols)} features"
+    )
+    return ref
+
+
 # ---------------------------------------------------------------------------
 # Full preprocessing pipeline
 # ---------------------------------------------------------------------------
@@ -170,14 +156,9 @@ def run_preprocessing(config: dict | None = None) -> dict:
         1. Load train/test CSVs from the processed directory.
         2. Apply feature engineering.
         3. Compute drift baselines on training data (pre-scaling).
-        4. Fit scaler on training data, transform both sets.
-        5. Save processed datasets, scaler, and baselines.
-
-    Args:
-        config: Optional config dict.
-
-    Returns:
-        Dictionary with output paths and summary.
+        4. Persist a real sample of training data as ref_samples.json.
+        5. Fit scaler on training data, transform both sets.
+        6. Save processed datasets, scaler, baselines, and ref samples.
     """
     if config is None:
         config = load_config()
@@ -187,6 +168,7 @@ def run_preprocessing(config: dict | None = None) -> dict:
     baselines_path = str(root / config["data"]["baselines_path"])
     models_dir = str(root / "models")
     ensure_dir(models_dir)
+    ensure_dir(os.path.dirname(baselines_path))
 
     # Load split data
     train_df = pd.read_csv(os.path.join(processed_dir, "train.csv"))
@@ -203,6 +185,12 @@ def run_preprocessing(config: dict | None = None) -> dict:
     baselines = compute_drift_baselines(train_df, feature_cols)
     save_json(baselines, baselines_path)
     logger.info(f"Drift baselines saved to {baselines_path}")
+
+    # Reference samples for KS/PSI — sibling of baselines.json
+    ref_samples_path = str(Path(baselines_path).parent / "ref_samples.json")
+    ref_samples = compute_reference_samples(train_df, feature_cols)
+    save_json(ref_samples, ref_samples_path)
+    logger.info(f"Reference samples saved to {ref_samples_path}")
 
     # Fit & apply scaler
     scaler_path = os.path.join(models_dir, "scaler.joblib")
@@ -224,6 +212,7 @@ def run_preprocessing(config: dict | None = None) -> dict:
         "test_processed_path": test_out,
         "scaler_path": scaler_path,
         "baselines_path": baselines_path,
+        "ref_samples_path": ref_samples_path,
         "feature_columns": feature_cols,
         "num_features": len(feature_cols),
     }
@@ -233,3 +222,4 @@ if __name__ == "__main__":
     result = run_preprocessing()
     print(f"Preprocessing complete: {result['status']}")
     print(f"Features: {result['num_features']} | Scaler: {result['scaler_path']}")
+    print(f"Ref samples: {result['ref_samples_path']}")
