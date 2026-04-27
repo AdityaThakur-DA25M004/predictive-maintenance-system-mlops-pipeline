@@ -22,8 +22,8 @@ render_header("📊 System Monitoring & Drift Detection",
 client = get_client()
 cfg = get_config()
 
-tab_model, tab_drift, tab_retrain = st.tabs([
-    "📈 Model Quality", "📉 Drift Detection", "🔁 Retrain",
+tab_model, tab_drift, tab_retrain, tab_alerts = st.tabs([
+    "📈 Model Quality", "📉 Drift Detection", "🔁 Retrain", "🚨 Alerts",
 ])
 
 # ══ Model Quality ════════════════════════════════════════════════════════
@@ -323,6 +323,49 @@ with tab_retrain:
 
     st.divider()
 
+    # ── Email alert status (so user knows whether retrain emails will fire) ──
+    st.markdown("##### ✉️ Email Alert Configuration")
+    import requests as _alerts_requests
+    email_sent_count = 0
+    log_only_count = 0
+    try:
+        r_emstat = _alerts_requests.get(
+            f"{cfg.prometheus_internal_url}/api/v1/query",
+            params={"query": "sum(alert_notifications_total) by (channel)"},
+            timeout=3,
+        )
+        if r_emstat.ok:
+            for item in r_emstat.json().get("data", {}).get("result", []):
+                ch = item["metric"].get("channel", "unknown")
+                val = float(item["value"][1])
+                if ch == "email":
+                    email_sent_count = int(val)
+                elif ch == "log":
+                    log_only_count = int(val)
+    except Exception:
+        pass
+
+    if email_sent_count > 0:
+        st.success(
+            f"✅ Email alerts are working — **{email_sent_count}** alert email(s) sent so far. "
+            f"({log_only_count} additional alerts logged but not emailed.)"
+        )
+    elif log_only_count > 0:
+        st.warning(
+            f"⚠️ {log_only_count} alert(s) have been generated but **none were sent by email**. "
+            "Either SMTP isn't configured or sending is failing. "
+            "Set `ALERT_EMAIL_ENABLED=true`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASSWORD`, and `ALERT_RECIPIENT` "
+            "in your `.env` file (use a Gmail App Password — not your normal Gmail password). "
+            "Alerts are still recorded in Prometheus and visible in the **Alerts** tab."
+        )
+    else:
+        st.info(
+            "ℹ️ No alerts have been triggered yet. When drift is detected, retrain is triggered, or training "
+            "completes, alerts will be dispatched via email (if SMTP is configured) and tracked in Prometheus."
+        )
+
+    st.divider()
+
     # ── Manual retrain trigger (key only) ─────────────────────────────
     st.markdown("##### ⚡ Manual Retrain Trigger (no file upload)")
     r1, r2 = st.columns([2, 3])
@@ -374,14 +417,159 @@ with tab_retrain:
     from frontend.common import _is_reachable
     mon_col1, mon_col2 = st.columns(2)
     with mon_col1:
-        if _is_reachable(cfg.grafana_url):
+        # Probe via Docker DNS, but link the user's browser to the host port
+        if _is_reachable(cfg.grafana_internal_url):
             st.link_button("📊 Open Grafana", cfg.grafana_url, use_container_width=True)
         else:
             st.button("📊 Grafana — offline", disabled=True, use_container_width=True,
-                      help=f"{cfg.grafana_url} not reachable. Use Docker Compose to start Grafana.")
+                      help=f"{cfg.grafana_internal_url} not reachable. Use Docker Compose to start Grafana.")
     with mon_col2:
-        if _is_reachable(cfg.prometheus_url):
+        if _is_reachable(cfg.prometheus_internal_url):
             st.link_button("🔢 Open Prometheus", cfg.prometheus_url, use_container_width=True)
         else:
             st.button("🔢 Prometheus — offline", disabled=True, use_container_width=True,
-                      help=f"{cfg.prometheus_url} not reachable. Use Docker Compose to start Prometheus.")
+                      help=f"{cfg.prometheus_internal_url} not reachable. Use Docker Compose to start Prometheus.")
+
+# ══ Alerts ════════════════════════════════════════════════════════════════
+with tab_alerts:
+    st.markdown("#### 🚨 System Alerts")
+    st.caption(
+        "Live view of Prometheus alert rules and dispatched notifications. "
+        "Drift, model quality, API health, and training lifecycle events are tracked here."
+    )
+
+    import requests as _r
+    import datetime as _dt
+
+    def _prom_query(expr: str) -> list[dict]:
+        try:
+            resp = _r.get(
+                f"{cfg.prometheus_internal_url}/api/v1/query",
+                params={"query": expr},
+                timeout=5,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {}).get("result", [])
+        except Exception as e:
+            st.warning(f"Prometheus query failed: {e}")
+            return []
+
+    def _prom_alerts() -> list[dict]:
+        """Fetch live alert state from Prometheus /api/v1/alerts."""
+        try:
+            resp = _r.get(
+                f"{cfg.prometheus_internal_url}/api/v1/alerts",
+                timeout=5,
+            )
+            resp.raise_for_status()
+            return resp.json().get("data", {}).get("alerts", [])
+        except Exception:
+            return []
+
+    # ── Headline counters ─────────────────────────────────────────────
+    c1, c2, c3, c4 = st.columns(4)
+
+    drift_now = _prom_query("drift_detected")
+    drift_now_val = float(drift_now[0]["value"][1]) if drift_now else 0
+    c1.metric("Data Drift", "🟥 ACTIVE" if drift_now_val > 0 else "🟢 None")
+
+    retrain_total = _prom_query("sum(retrain_triggers_total)")
+    retrain_val = float(retrain_total[0]["value"][1]) if retrain_total else 0
+    c2.metric("Retrain Triggers (all-time)", int(retrain_val))
+
+    email_total = _prom_query('sum(alert_notifications_total{channel="email"})')
+    email_val = float(email_total[0]["value"][1]) if email_total else 0
+    c3.metric("Alert Emails Sent", int(email_val))
+
+    log_total = _prom_query('sum(alert_notifications_total{channel="log"})')
+    log_val = float(log_total[0]["value"][1]) if log_total else 0
+    c4.metric("Alerts Log-Only", int(log_val),
+              help="Alerts generated but not emailed (SMTP unconfigured or failed)")
+
+    st.markdown("---")
+
+    # ── Live firing alerts (from /api/v1/alerts) ──────────────────────
+    st.markdown("##### 🔥 Currently firing alerts")
+    alerts = _prom_alerts()
+    firing = [a for a in alerts if a.get("state") == "firing"]
+    pending = [a for a in alerts if a.get("state") == "pending"]
+
+    if firing:
+        rows = []
+        for a in firing:
+            labels = a.get("labels", {})
+            ann = a.get("annotations", {})
+            rows.append({
+                "Alert": labels.get("alertname", "—"),
+                "Severity": labels.get("severity", "—"),
+                "Category": labels.get("category", "—"),
+                "Summary": ann.get("summary", ""),
+                "Description": ann.get("description", ""),
+                "Active Since": a.get("activeAt", "")[:19].replace("T", " "),
+            })
+        st.error(f"**{len(firing)} alert(s) currently firing**")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    elif pending:
+        st.warning(f"⏳ {len(pending)} alert(s) pending (waiting for `for:` duration to elapse)")
+    else:
+        st.success("✅ No alerts firing.")
+
+    if pending and firing:
+        with st.expander(f"⏳ {len(pending)} pending alert(s)", expanded=False):
+            for a in pending:
+                st.write(f"- **{a['labels'].get('alertname', '—')}** — "
+                         f"{a.get('annotations', {}).get('summary', '')}")
+
+    st.markdown("---")
+
+    # ── Alert dispatch breakdown ──────────────────────────────────────
+    st.markdown("##### 📬 Alert dispatches by type and channel (last 24h)")
+    dispatched = _prom_query(
+        "sum(increase(alert_notifications_total[24h])) by (alert_type, channel)"
+    )
+    if dispatched:
+        rows = []
+        for r in dispatched:
+            metric = r.get("metric", {})
+            rows.append({
+                "Alert Type": metric.get("alert_type", "unknown"),
+                "Channel": metric.get("channel", "unknown"),
+                "Count (24h)": float(r["value"][1]),
+            })
+        df_disp = pd.DataFrame(rows).sort_values(
+            ["Alert Type", "Channel"], ascending=[True, False]
+        )
+        st.dataframe(df_disp, use_container_width=True, hide_index=True)
+    else:
+        st.info("No alert dispatches in the last 24 hours.")
+
+    st.markdown("---")
+
+    # ── Defined alert rules (helpful for users new to the system) ────
+    st.markdown("##### 📋 Configured alert rules")
+    with st.expander("View alert rule definitions", expanded=False):
+        st.caption("These rules are defined in `monitoring/prometheus/alert_rules.yml`.")
+        rules_summary = pd.DataFrame([
+            {"Rule": "APIDown",                     "Threshold": "scrape failure for 1m",     "Severity": "critical"},
+            {"Rule": "ModelNotLoaded",              "Threshold": "F1 == 0 for 5m",            "Severity": "critical"},
+            {"Rule": "HighErrorRate",               "Threshold": "> 5% errors for 2m",        "Severity": "critical"},
+            {"Rule": "ElevatedErrorRate",           "Threshold": "> 2% errors for 5m",        "Severity": "warning"},
+            {"Rule": "HighLatencyP95",              "Threshold": "P95 > 200ms for 3m",        "Severity": "warning"},
+            {"Rule": "VeryHighLatencyP99",          "Threshold": "P99 > 500ms for 5m",        "Severity": "critical"},
+            {"Rule": "DataDriftDetected",           "Threshold": "drift_detected==1 for 5m",  "Severity": "warning"},
+            {"Rule": "MultipleFeaturesDrifted",     "Threshold": "≥ 3 features for 2m",       "Severity": "critical"},
+            {"Rule": "ModelF1Degraded",             "Threshold": "F1 < 0.5 for 10m",          "Severity": "warning"},
+            {"Rule": "FeedbackAccuracyDegraded",    "Threshold": "rolling acc < 70% for 15m", "Severity": "warning"},
+            {"Rule": "RetrainStorm",                "Threshold": "> 5 retrains in 15m",       "Severity": "warning"},
+            {"Rule": "ModelStale",                  "Threshold": "> 7 days since training",   "Severity": "warning"},
+            {"Rule": "UploadSuccessRate",           "Threshold": "> 50% upload failures",     "Severity": "warning"},
+            {"Rule": "TrainingDataSourceDefault",   "Threshold": "default dataset used",      "Severity": "info"},
+            {"Rule": "AlertEmailDispatchFailing",   "Threshold": "log alerts but no email",   "Severity": "warning"},
+        ])
+        st.dataframe(rules_summary, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.caption(
+        f"💡 For richer time-series and history, use [Grafana]({cfg.grafana_url}) "
+        f"or [Prometheus]({cfg.prometheus_url}/alerts) directly."
+    )

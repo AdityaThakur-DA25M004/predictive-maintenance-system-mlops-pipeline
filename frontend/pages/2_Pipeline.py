@@ -95,21 +95,23 @@ for i, (icon, name, desc, module, outputs, est_time) in enumerate(stages):
 st.markdown("---")
 st.markdown("### Open external tools")
 from frontend.common import _is_reachable
+# (label, browser_url, internal_url) — internal_url is for the reachability
+# probe (Docker DNS), browser_url is what the user's browser opens.
 tools_pipeline = [
-    ("🔬 MLflow",     cfg.mlflow_url),
-    ("🌀 Airflow",    cfg.airflow_url),
-    ("📊 Grafana",    cfg.grafana_url),
-    ("🔢 Prometheus", cfg.prometheus_url),
+    ("🔬 MLflow",     cfg.mlflow_url,     cfg.mlflow_internal_url),
+    ("🌀 Airflow",    cfg.airflow_url,    cfg.airflow_internal_url),
+    ("📊 Grafana",    cfg.grafana_url,    cfg.grafana_internal_url),
+    ("🔢 Prometheus", cfg.prometheus_url, cfg.prometheus_internal_url),
 ]
 cols = st.columns(len(tools_pipeline))
-for col, (label, url) in zip(cols, tools_pipeline):
+for col, (label, browser_url, internal_url) in zip(cols, tools_pipeline):
     with col:
-        if _is_reachable(url):
-            st.link_button(label, url, use_container_width=True)
+        if _is_reachable(internal_url):
+            st.link_button(label, browser_url, use_container_width=True)
         else:
             st.button(
                 f"{label} — offline",
                 disabled=True,
                 use_container_width=True,
-                help=f"{url} is not reachable. Start the service or use Docker Compose.",
+                help=f"{internal_url} is not reachable. Start the service or use Docker Compose.",
             )

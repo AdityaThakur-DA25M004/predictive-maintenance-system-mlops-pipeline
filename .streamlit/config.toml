@@ -1,0 +1,22 @@
+# ============================================================
+# Streamlit config — bind-mounted into /home/app/.streamlit/
+# ============================================================
+# Port 8501 EVERYWHERE: container=8501, host=8501, browser=8501.
+# No port translation = no WebSocket Origin mismatch.
+
+[server]
+headless = true
+address = "0.0.0.0"
+port = 8501
+enableCORS = false
+enableXsrfProtection = false
+enableWebsocketCompression = false
+
+[browser]
+serverAddress = "localhost"
+serverPort = 8501
+gatherUsageStats = false
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"
