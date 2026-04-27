@@ -19,3 +19,12 @@ htmlcov/
 .pytest_cache/
 .env.local
 .dvc/config.local
+
+# Runtime SQLite (per-instance state)
+data/feedback/*.db
+data/feedback/*.db-journal
+
+# Scratch data files (use tests/fixtures/ for keepers)
+/ai4i2020.csv
+/drift_payload.json
+/heavily_drifted_data.csv
