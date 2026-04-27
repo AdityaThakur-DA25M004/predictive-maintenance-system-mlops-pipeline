@@ -1,5 +1,15 @@
+# =============================================================================
 # Prometheus Alert Rules for Predictive Maintenance System
-# Covers: error rate >5%, data drift, latency SLO, model quality, feedback accuracy
+# =============================================================================
+# Covers: error rate >5%, data drift, latency SLO, model quality, feedback
+# accuracy, training lifecycle, alert-pipeline self-monitoring.
+#
+# Mounted into the prometheus container at:
+#   /etc/prometheus/alert_rules.yml  (read-only)
+#
+# Reload after editing without restart (requires --web.enable-lifecycle):
+#   curl -X POST http://localhost:9090/-/reload
+# =============================================================================
 
 groups:
   - name: api_availability
@@ -16,14 +26,22 @@ groups:
           description: "The FastAPI backend has been unreachable for more than 1 minute."
 
       - alert: ModelNotLoaded
-        expr: absent(model_f1_score) or model_f1_score == 0
-        for: 2m
+        # Original was `absent(model_f1_score) or model_f1_score == 0`, which
+        # fires for ~30s on every API restart because the gauge defaults to 0
+        # before _load_artifacts() runs. Adding a 5m grace period removes the
+        # restart-flap without compromising signal — a real "no model" outage
+        # will persist much longer than that.
+        expr: model_f1_score == 0
+        for: 5m
         labels:
           severity: critical
           component: model
         annotations:
           summary: "Model is not loaded or F1 is zero"
-          description: "Check the training pipeline or MLflow registry."
+          description: >
+            model_f1_score has been 0 for 5+ minutes. The API is up but no
+            model artifacts have been loaded into memory. Check the training
+            pipeline, MLflow registry, or POST /admin/reload-model.
 
   - name: api_performance
     interval: 30s
@@ -150,8 +168,15 @@ groups:
           description: "{{ $value }} retrain triggers in the last 15 minutes — check automation."
 
       - alert: ModelStale
-        # No training run in the past 7 days
-        expr: (time() - last_training_timestamp_seconds) > 604800
+        # No training run in the past 7 days.
+        # Original guarded only by the threshold, but at fresh deploy
+        # last_training_timestamp_seconds=0, so (time() - 0) is ~1.7e9 and the
+        # rule fires immediately. Add `> 0` guard so it only evaluates after
+        # the first training run actually completes.
+        expr: |
+          (time() - last_training_timestamp_seconds) > 604800
+          and
+          last_training_timestamp_seconds > 0
         for: 5m
         labels:
           severity: warning
@@ -178,13 +203,45 @@ groups:
           description: "More than half of CSV uploads are being rejected — check data schema."
 
       - alert: TrainingDataSourceDefault
-        # Fires when the last retrain used the default dataset
-        # (i.e. uploaded file was ignored or not present)
-        expr: retrain_data_source == 0 and sum(retrain_triggers_total) > 0
+        # Original used `retrain_data_source == 0 and sum(retrain_triggers_total) > 0`
+        # which fails to match because the gauge has no labels but sum() drops
+        # them, leaving incompatible vector shapes.
+        # Fix: use `on()` clause to explicitly match across the empty label set,
+        # AND require recent retrain activity (not all-time) to avoid firing on
+        # every fresh deploy where the gauge defaults to 0.
+        expr: |
+          retrain_data_source == 0
+          and on()
+          (sum(increase(retrain_triggers_total[1h])) > 0)
         for: 30m
         labels:
           severity: info
           component: pipeline
         annotations:
-          summary: "Retraining is using default dataset (no upload detected)"
-          description: "Upload a new CSV via /retrain/upload to train on fresh data."
+          summary: "Recent retraining used default dataset (no upload detected)"
+          description: >
+            A retrain was triggered in the last hour but trained on the default
+            dataset. Upload a new CSV via /retrain/upload before triggering
+            retrain to use fresh data.
+
+  - name: alert_pipeline_self_monitoring
+    interval: 1m
+    rules:
+      - alert: AlertEmailDispatchFailing
+        # Detect when alerts are firing but emails are NOT going out.
+        # If we accumulate 3+ "log-only" alerts and zero emails over 30m,
+        # SMTP is misconfigured or broken.
+        expr: |
+          sum(increase(alert_notifications_total{channel="log"}[30m])) >= 3
+          and on()
+          sum(increase(alert_notifications_total{channel="email"}[30m])) == 0
+        for: 1m
+        labels:
+          severity: warning
+          component: alerting
+        annotations:
+          summary: "Alerts are firing but emails are not being sent"
+          description: >
+            {{ $value }} alerts logged in the last 30m but zero emails sent.
+            Check ALERT_EMAIL_ENABLED, SMTP credentials, and the
+            ALERT_RECIPIENT in your .env file.
