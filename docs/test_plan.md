@@ -1,129 +1,130 @@
-# Test Plan & Test Cases
+# Test Plan
 
-## 1. Testing Strategy
+> Predictive Maintenance System — test strategy, coverage map, acceptance criteria.
 
-| Level | Scope | Tool |
-|-------|-------|------|
-| Unit | Individual functions (ingestion, preprocessing, drift, training) | pytest |
-| Integration | API endpoints with TestClient | pytest + fastapi.testclient |
-| End-to-end | Full Docker Compose stack | docker compose + curl |
+## 1. Scope
 
-## 2. Acceptance Criteria
+This plan covers automated testing for the Predictive Maintenance ML Pipeline. It does **not** cover load testing, security penetration testing, or chaos engineering — those are out of scope for the academic deliverable.
 
-1. All unit and integration tests pass (0 failures, 0 errors).
-2. `GET /health` returns HTTP 200 in under 1 second.
-3. `POST /predict` returns valid JSON with `prediction`, `failure_probability`, `risk_level`, `prediction_id`.
-4. `POST /feedback` records ground truth and updates rolling accuracy.
-5. Model F1 ≥ 0.65 on the AI4I 2020 hold-out set.
-6. p95 inference latency < 200 ms (business SLO).
-7. Drift detector flags synthetic drift in 100% of injected-drift test cases.
-8. `docker compose up --build` brings all services to healthy state.
-9. `/retrain` returns 401 without `X-API-Key` and 200 with a valid key.
-10. Prometheus successfully scrapes `/metrics`.
+## 2. Test types and coverage
 
-## 3. Test Cases
+| Layer | Type | Files | Count |
+|---|---|---|---|
+| Data ingestion | Unit | `tests/test_data_ingestion.py` | 11 |
+| Preprocessing & feature engineering | Unit | `tests/test_preprocessing.py` | 6 |
+| Drift detection (KS + PSI) | Unit | `tests/test_drift.py` | 4 |
+| Model evaluation | Unit / Integration | `tests/test_model.py` | 3 |
+| API endpoints | Integration | `tests/test_api.py` | 18 |
+| **Total** | | | **42** |
 
-### 3.1 Data Ingestion (`test_data_ingestion.py`)
+## 3. Test framework and tooling
 
-| ID | Test Case | Expected Result |
-|----|-----------|-----------------|
-| DI-01 | Load existing CSV file | DataFrame with 100 rows loaded |
-| DI-02 | Load non-existent file | FileNotFoundError raised |
-| DI-03 | Validate correct schema | Returns True |
-| DI-04 | Validate schema with missing column | ValueError raised |
-| DI-05 | Data quality on clean data | Status = PASS, 0 missing |
-| DI-06 | Data quality with missing values | Detects missing count > 0 |
-| DI-07 | Train/test split sizes | 80 / 20 |
-| DI-08 | Stratified split preservation | Failure rate delta < 0.05 |
-| DI-09 | Leaky columns dropped (failure modes) | TWF/HDF/PWF/OSF/RNF removed |
-| DI-10 | Identifier columns dropped | UDI/Product ID removed |
-| DI-11 | Features and target kept | Machine failure, Air temp, Type present |
+- **pytest** — primary test runner.
+- **pytest fixtures** — shared `sample_data`, `sample_reading`, `client`, `trained_model` fixtures via `conftest.py`.
+- **fastapi.testclient.TestClient** — for API integration tests (no live server required).
+- **tmp_path** — pytest's temp-directory fixture for filesystem-touching tests.
 
-### 3.2 Preprocessing (`test_preprocessing.py`)
+## 4. Acceptance criteria
 
-| ID | Test Case | Expected Result |
-|----|-----------|-----------------|
-| PP-01 | Feature engineering adds columns | 5 new features present |
-| PP-02 | `temp_diff` calculation correct | Process − Air temp |
-| PP-03 | Type encoding correct | H=0, L=1, M=2 |
-| PP-04 | No input mutation | Original DataFrame unchanged |
-| PP-05 | Scaler fit and transform | Mean ≈ 0 after scaling |
-| PP-06 | Drift baselines structure | All stats keys present |
+The build is acceptable for delivery / demo if:
 
-### 3.3 Drift Detection (`test_drift.py`)
+| # | Criterion | How verified |
+|---|---|---|
+| 1 | All 42 unit + integration tests pass | `pytest -q` exit code 0 |
+| 2 | Best model F1 ≥ 0.80 | `models/test_metrics.json` |
+| 3 | Best model ROC-AUC ≥ 0.90 | `models/test_metrics.json` |
+| 4 | Single-prediction p99 latency < 200 ms | Prometheus histogram on `predict_latency_ms` |
+| 5 | Drift on identical distributions returns `overall_drift=False` | `test_drift.test_identical_distributions_no_drift` |
+| 6 | Drift on shifted distributions returns `overall_drift=True` | `test_drift.test_shifted_distribution_detects_drift` |
+| 7 | Leaky columns (TWF/HDF/PWF/OSF/RNF) are dropped before training | `test_data_ingestion.test_removes_failure_mode_cols` |
+| 8 | API returns 401/403 on `/retrain*` without valid key | `test_api.test_retrain_without_api_key`, `test_retrain_with_wrong_key` |
+| 9 | Schema-invalid uploads rejected with 4xx | `test_data_ingestion.test_missing_columns` + `test_api.test_predict_invalid_product_type` |
+| 10 | Prometheus `/metrics` endpoint serves valid exposition | `test_api.test_prometheus_metrics` |
 
-| ID | Test Case | Expected Result |
-|----|-----------|-----------------|
-| DR-01 | KS test on identical distributions | `drift_detected = False` |
-| DR-02 | KS test on shifted distribution (+3σ) | `drift_detected = True` |
-| DR-03 | PSI ≈ 0 for identical data | PSI < 0.1 |
-| DR-04 | PSI > 0.25 on large shift | PSI > 0.25 |
+## 5. Coverage map by component
 
-### 3.4 Model (`test_model.py`)
+### 5.1 `data_ingestion.py`
+- ✅ Loading existing & missing files
+- ✅ Schema validation (valid + missing columns)
+- ✅ Data quality report (pass + missing-value detection)
+- ✅ Stratified split sizes & class ratio preservation
+- ✅ Leaky column removal (failure-mode flags, identifiers)
+- ✅ Feature column preservation
 
-| ID | Test Case | Expected Result |
-|----|-----------|-----------------|
-| ML-01 | `evaluate_model` returns all metrics | All 9 keys present |
-| ML-02 | Metrics in valid range | All between 0 and 1 |
-| ML-03 | Confusion matrix sums to N | TP+TN+FP+FN = total |
+### 5.2 `data_preprocessing.py`
+- ✅ Feature engineering: derived features added (`temp_diff`, `power`, `wear_degree`, `type_encoded`, `speed_torque_ratio`)
+- ✅ `temp_diff` arithmetic correctness
+- ✅ Type encoding correctness (H=0, L=1, M=2)
+- ✅ Idempotence — no mutation of input DataFrame
+- ✅ Scaler fit + apply round-trip
+- ✅ Drift baselines structure (mean/std/min/max/quantiles per feature)
 
-### 3.5 API (`test_api.py`)
+### 5.3 `drift_detection.py`
+- ✅ KS test on identical distributions → no drift
+- ✅ KS test on shifted distributions → drift
+- ✅ PSI on identical data → low value
+- ✅ PSI on shifted data → high value (>0.2)
 
-| ID | Test Case | Expected Result |
-|----|-----------|-----------------|
-| API-01 | `GET /health` | 200, `status=healthy` |
-| API-02 | `GET /ready` with model | 200, `status=ready` |
-| API-03 | `GET /ready` without model | 503 |
-| API-04 | `GET /model/info` | 200, `model_loaded` field |
-| API-05 | `POST /predict` valid input | 200, prediction in {0,1}, `prediction_id` present |
-| API-06 | `POST /predict` invalid product_type | 422 |
-| API-07 | `POST /predict` missing fields | 422 |
-| API-08 | `POST /predict` out-of-range temp | 422 |
-| API-09 | `POST /predict/batch` valid | 200, correct total |
-| API-10 | `POST /predict/batch` empty | 422 |
-| API-11 | `POST /feedback` valid prediction_id | 200, `correct` bool returned |
-| API-12 | `POST /feedback` unknown prediction_id | 404 |
-| API-13 | `GET /feedback/stats` | 200, reports totals |
-| API-14 | `POST /retrain` without X-API-Key | 401 |
-| API-15 | `POST /retrain` with wrong key | 401 |
-| API-16 | `POST /retrain` with valid key | 200, status=triggered |
-| API-17 | `GET /metrics` | 200, contains `prediction_requests_total` |
-| API-18 | `POST /drift/check` with empty batch | 422 |
+### 5.4 `model_training.py`
+- ✅ Returns full metric set
+- ✅ All metrics are within valid range [0, 1]
+- ✅ Confusion matrix sums equal test-set size
 
-## 4. Test Execution
+### 5.5 API (`main.py`)
+- ✅ Health & readiness — with and without model loaded
+- ✅ Model info endpoint
+- ✅ Prediction — valid input, invalid type, missing field, out-of-range temperature
+- ✅ Batch prediction — happy path + empty input rejection
+- ✅ Feedback — valid submission + unknown prediction ID
+- ✅ Feedback stats endpoint
+- ✅ Retrain — without key (401), wrong key (403), valid key (200)
+- ✅ Drift check — empty payload rejected
+- ✅ Prometheus `/metrics` endpoint
 
-```bash
-# All tests
-pytest tests/ -v --tb=short
+## 6. How to run
 
-# Coverage
-pytest tests/ -v --cov=src --cov=api --cov-report=html --cov-report=term
+### Local (Windows PowerShell, repo root)
+```powershell
+# Activate venv first
+.\venv\Scripts\Activate.ps1
 
-# One module
-pytest tests/test_api.py -v
+# Full test suite
+pytest -q
+
+# With coverage report
+pytest --cov=src --cov=api --cov-report=term-missing
+
+# Single file
+pytest tests/test_drift.py -v
+
+# Single test
+pytest tests/test_drift.py::TestKSTest::test_identical_distributions_no_drift -v
 ```
 
-## 5. Test Report
+### In Docker
+```powershell
+docker compose exec api pytest -q
+```
 
-Results from validated test run:
+## 7. Test environment
 
-| Metric | Value |
-|--------|-------|
-| Total test cases | 42 |
-| Passed | 42 |
-| Failed | 0 |
-| Skipped | 0 |
-| Test run time | 14.0 s |
-| Date | 2026-04-20 |
+- Python 3.11
+- Tests run with synthetic and small-fixture data — no external network calls.
+- API tests use `TestClient`, not a live HTTP server.
+- No reliance on `mlflow:5000`, `airflow-webserver:8080`, or DagsHub during test execution.
 
-### Model Acceptance
+## 8. Out-of-scope (deliberate)
 
-| Metric | Threshold | Observed |
-|--------|-----------|----------|
-| F1-score | ≥ 0.65 | **0.848** |
-| ROC-AUC | ≥ 0.85 | **0.961** |
-| Precision | — | **0.930** |
-| Recall | — | **0.779** |
-| Accuracy | — | **0.991** |
+- **Load testing** — single-replica RandomForest is the bottleneck, not the API; would need a separate load test harness (e.g., Locust) that's outside the assignment scope.
+- **End-to-end browser testing** — UI is Streamlit, would require Selenium or Playwright; visual smoke testing handled manually during demo.
+- **Security testing** — covered conceptually via API-key gating; no formal pentest.
+- **Chaos / failure injection** — not part of the academic deliverable.
 
-All acceptance criteria met.
+## 9. Continuous integration
+
+Tests are intended to be run:
+- On every developer push (ad-hoc, locally).
+- Before any `dvc repro` invocation that produces a release-tagged version.
+- Before promoting a model to production via the rollback API.
+
+CI hosting (e.g., GitHub Actions) is **not** configured — the assignment forbids cloud-hosted CI. DVC's reproducibility (`dvc repro` honouring file hashes) provides the equivalent guarantee on a developer machine.

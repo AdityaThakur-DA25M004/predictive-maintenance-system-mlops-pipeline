@@ -1,8 +1,18 @@
 name: predictive-maintenance
 
-python_env: python_env.yaml
+# Uses the ambient Python environment (the one your venv or Docker
+# image already provides). MLflow does not pip-install anything when
+# the entry point is invoked with --env-manager=local.
+#
+# To run any stage:
+#   mlflow run . -e train --env-manager=local
+#   mlflow run . -e drift_check --env-manager=local
+#
+# To reproduce the whole pipeline (delegates to DVC):
+#   mlflow run . --env-manager=local
 
 entry_points:
+
   ingest:
     command: "python -m src.data_ingestion"
 
@@ -11,9 +21,13 @@ entry_points:
 
   train:
     parameters:
-      n_estimators: {type: int, default: 200}
-      max_depth: {type: int, default: 10}
+      n_estimators: {type: int, default: 100}
     command: "python -m src.model_training"
 
+  drift_check:
+    command: "python -m src.drift_detection"
+
+  # Default entry point — runs the full reproducible pipeline via DVC.
+  # DVC handles stage skipping based on file hashes, so this is idempotent.
   main:
-    command: "python -m src.data_ingestion && python -m src.data_preprocessing && python -m src.model_training"
+    command: "dvc repro"

@@ -1,117 +1,142 @@
-# Architecture Diagram & High-Level Design
+# Architecture Diagram
 
-## 1. System Architecture
+> Predictive Maintenance System — end-to-end MLOps pipeline for industrial machine failure prediction.
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        DOCKER COMPOSE NETWORK                       │
-│                                                                     │
-│  ┌─────────────┐        ┌──────────────┐        ┌───────────────┐  │
-│  │  Streamlit   │──REST──│   FastAPI     │──log───│    MLflow      │  │
-│  │  Frontend    │  API   │   Backend    │  track │   Tracking     │  │
-│  │  :8501       │        │   :8000      │        │   Server :5000 │  │
-│  └─────────────┘        └──────┬───────┘        └───────────────┘  │
-│                                │                                    │
-│                         ┌──────┴───────┐                           │
-│                         │  /metrics     │                           │
-│                         └──────┬───────┘                           │
-│                                │                                    │
-│  ┌─────────────┐        ┌──────▼───────┐        ┌───────────────┐  │
-│  │   Grafana    │◄─query─│  Prometheus   │        │   Airflow      │  │
-│  │   :3000      │        │   :9090      │        │   :8080        │  │
-│  └─────────────┘        └──────────────┘        └───────────────┘  │
-│                                                         │           │
-│                                                  ┌──────▼───────┐  │
-│                                                  │  PostgreSQL   │  │
-│                                                  │   :5432       │  │
-│                                                  └──────────────┘  │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │                    Shared Volumes                             │   │
-│  │  data/raw  │  data/processed  │  models/  │  configs/        │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+## System architecture (block diagram)
 
-External:
-  ┌──────────┐       ┌──────────┐
-  │  DagsHub  │       │   Git     │
-  │  (DVC     │       │  (source  │
-  │   remote) │       │   control)│
-  └──────────┘       └──────────┘
-```
+```mermaid
+flowchart TB
+    subgraph User["👤 User"]
+        BROWSER[Web Browser]
+    end
 
-## 2. Component Descriptions
+    subgraph Frontend["🎨 Frontend Layer (Streamlit, port 8501)"]
+        APP[Dashboard]
+        PREDICT[Predict Page]
+        PIPELINE[Pipeline Page]
+        MONITOR[Monitoring Page]
+        MANUAL[User Manual]
+    end
 
-### 2.1 Frontend (Streamlit)
-- **Port**: 8501
-- **Purpose**: User-facing web dashboard
-- **Pages**: Dashboard, Predict, Pipeline, Monitoring, User Manual
-- **Communication**: REST API calls to FastAPI backend
-- **Design Choice**: Streamlit provides rapid prototyping with rich data visualization.
-  Loose coupling via REST ensures the UI can be swapped independently.
+    subgraph Backend["⚙️ Backend Layer"]
+        API[FastAPI Service<br/>port 8000]
+        MLFLOW_SERVE[MLflow Models Serve<br/>port 5001<br/>POST /invocations]
+        FEEDBACK_DB[(SQLite<br/>feedback.db)]
+    end
 
-### 2.2 Backend API (FastAPI)
-- **Port**: 8000
-- **Purpose**: Model serving, drift detection, metrics export
-- **Endpoints**: /predict, /predict/batch, /drift/check, /health, /ready, /retrain, /metrics, /model/info
-- **Design Choice**: FastAPI provides async support, auto-generated OpenAPI docs,
-  Pydantic validation, and native compatibility with Prometheus.
+    subgraph MLOps["🔬 MLOps Stack"]
+        AIRFLOW[Apache Airflow<br/>Scheduler + Webserver<br/>port 8080]
+        MLFLOW[MLflow Tracking + Registry<br/>port 5000]
+        PROMETHEUS[Prometheus<br/>port 9090]
+        GRAFANA[Grafana<br/>25-panel dashboard<br/>port 3000]
+    end
 
-### 2.3 MLflow Tracking Server
-- **Port**: 5000
-- **Purpose**: Experiment tracking, model registry, artifact storage
-- **Backend Store**: SQLite (upgradeable to PostgreSQL)
-- **Artifact Store**: Local filesystem (/mlflow/artifacts)
-- **Design Choice**: MLflow is the industry standard for experiment tracking.
-  Central server enables team collaboration.
+    subgraph Storage["💾 Storage Layer"]
+        RAW[(data/raw/<br/>ai4i2020.csv)]
+        PROCESSED[(data/processed/<br/>train.csv, test.csv)]
+        BASELINES[(data/baselines/<br/>drift_baselines.json<br/>ref_samples.json<br/>drift_report.json)]
+        MODELS[(models/<br/>best_model.joblib<br/>scaler.joblib)]
+        UPLOADS[(data/feedback/uploads/<br/>user-uploaded CSVs)]
+        DAGSHUB[DagsHub Remote<br/>DVC + Git]
+    end
 
-### 2.4 Apache Airflow
-- **Port**: 8080
-- **Purpose**: Pipeline orchestration and scheduling
-- **Executor**: LocalExecutor with PostgreSQL metadata DB
-- **DAG**: predictive_maintenance_pipeline (ingest → preprocess → train → drift check → branch)
-- **Design Choice**: Airflow provides DAG-based scheduling, retry logic,
-  task dependencies, and a web UI for pipeline management.
+    BROWSER --> APP & PREDICT & PIPELINE & MONITOR & MANUAL
+    APP & PREDICT & PIPELINE & MONITOR --> API
+    API --> MODELS
+    API --> BASELINES
+    API --> FEEDBACK_DB
+    API -.metrics.-> PROMETHEUS
 
-### 2.5 Prometheus
-- **Port**: 9090
-- **Purpose**: Metrics collection and alerting
-- **Scrape Targets**: FastAPI /metrics endpoint
-- **Alert Rules**: High error rate (>5%), drift detected, high latency (p95>200ms)
-- **Design Choice**: Prometheus pull-based model integrates cleanly with containerized services.
+    PIPELINE -- upload CSV --> API
+    API -- write --> UPLOADS
+    API -- trigger DAG --> AIRFLOW
 
-### 2.6 Grafana
-- **Port**: 3000
-- **Purpose**: Real-time dashboards and visualization
-- **Datasource**: Prometheus (auto-provisioned)
-- **Dashboard**: Auto-provisioned with panels for requests, latency, errors, drift, model performance
-- **Design Choice**: Grafana provides customizable dashboards without code changes.
+    AIRFLOW -- ingest --> RAW & UPLOADS
+    AIRFLOW -- ingest writes --> PROCESSED
+    AIRFLOW -- preprocess writes --> BASELINES
+    AIRFLOW -- train logs --> MLFLOW
+    AIRFLOW -- train writes --> MODELS
+    AIRFLOW -- hot reload --> API
 
-### 2.7 PostgreSQL
-- **Port**: 5432
-- **Purpose**: Airflow metadata database
-- **Design Choice**: Production-grade database for Airflow's LocalExecutor.
+    MLFLOW_SERVE --> MLFLOW
+    MLFLOW_SERVE --> MODELS
 
-## 3. Data Flow
+    PROMETHEUS --> GRAFANA
+    PROMETHEUS -- alerts --> EMAIL[📧 Email<br/>via SMTP]
 
-```
-Raw CSV → Data Ingestion → Validation → Split (train/test)
-  → Feature Engineering → Drift Baselines
-  → Model Training (MLflow tracking) → Evaluation → Registration
-  → Deployment (FastAPI) → Monitoring (Prometheus/Grafana)
-  → Drift Detection → [If drift] → Retrain Trigger
+    Storage -.versioned by.-> DAGSHUB
+
+    classDef user fill:#fef3c7,stroke:#d97706
+    classDef frontend fill:#dbeafe,stroke:#2563eb
+    classDef backend fill:#ede9fe,stroke:#7c3aed
+    classDef mlops fill:#dcfce7,stroke:#16a34a
+    classDef storage fill:#fce7f3,stroke:#db2777
+    class BROWSER user
+    class APP,PREDICT,PIPELINE,MONITOR,MANUAL frontend
+    class API,MLFLOW_SERVE,FEEDBACK_DB backend
+    class AIRFLOW,MLFLOW,PROMETHEUS,GRAFANA mlops
+    class RAW,PROCESSED,BASELINES,MODELS,UPLOADS,DAGSHUB storage
 ```
 
-## 4. Design Rationale
+## ML pipeline DAG (reproducible via DVC + Airflow)
 
-| Decision | Rationale |
-|----------|-----------|
-| Microservices architecture | Loose coupling, independent scaling, separate concerns |
-| REST API between frontend and backend | Language-agnostic, testable, swappable UI |
-| Docker Compose | Reproducible environments, easy local development |
-| DVC for data/model versioning | Git-like workflow for large binary artifacts |
-| MLflow for experiment tracking | Industry standard, model registry, artifact logging |
-| Prometheus + Grafana for monitoring | Pull-based metrics, customizable dashboards, alerting |
-| RandomForest classifier | Handles imbalanced data, interpretable feature importance |
-| Stratified splitting | Preserves class distribution in train/test sets |
-| KS-test + PSI for drift detection | Statistical rigor, complementary approaches |
+```mermaid
+flowchart LR
+    INGEST["📥 data_ingestion<br/>load + validate +<br/>drop leaky cols + split"]
+    DRIFT["🔍 drift_check<br/>KS-test + PSI<br/>vs OLD baselines"]
+    PREPROCESS["⚙️ preprocessing<br/>feature engineer<br/>+ scale + write<br/>NEW baselines"]
+    RELOAD_BASELINES["🔄 reload_api_baselines<br/>(Airflow only)"]
+    TRAIN["🎯 model_training<br/>RF grid search<br/>+ MLflow log + register"]
+    RELOAD_MODEL["🔄 reload_api_model<br/>(Airflow only)"]
+    BRANCH{"drift?"}
+    NOTIFY["📧 retrain_notification<br/>email alert"]
+    NODRIFT["✅ no_drift_end"]
+    END["🏁 pipeline_end"]
+
+    INGEST --> DRIFT --> PREPROCESS --> RELOAD_BASELINES --> TRAIN --> RELOAD_MODEL --> BRANCH
+    BRANCH -- yes --> NOTIFY --> END
+    BRANCH -- no --> NODRIFT --> END
+
+    classDef step fill:#dbeafe,stroke:#2563eb
+    classDef decision fill:#fef3c7,stroke:#d97706
+    classDef alert fill:#fee2e2,stroke:#dc2626
+    classDef done fill:#dcfce7,stroke:#16a34a
+    class INGEST,DRIFT,PREPROCESS,TRAIN,RELOAD_BASELINES,RELOAD_MODEL step
+    class BRANCH decision
+    class NOTIFY alert
+    class NODRIFT,END done
+```
+
+## Block descriptions
+
+| Block | Role | Technology |
+|---|---|---|
+| **Dashboard / Predict / Pipeline / Monitoring / Manual** | Multi-page UI for non-technical users | Streamlit |
+| **FastAPI Service** | Primary inference API; feedback loop; drift endpoint; admin endpoints (retrain, reload, rollback); Prometheus metrics exporter | FastAPI + Pydantic |
+| **MLflow Models Serve** | Parallel MLflow-native inference endpoint at `POST /invocations` | `mlflow models serve` |
+| **Apache Airflow** | Pipeline orchestration: ingest → drift_check → preprocess → train → drift_branch | Airflow 2.x |
+| **MLflow Tracking + Registry** | Experiment tracking, model versioning, artifact storage | MLflow 2.x |
+| **Prometheus** | Metrics scraping + alert rule evaluation | Prometheus |
+| **Grafana** | NRT visualisation (25-panel dashboard) | Grafana |
+| **SQLite (feedback.db)** | Lightweight store for prediction-feedback ground-truth labels | sqlite3 |
+| **DagsHub Remote** | Off-host versioning of data + models via DVC | DVC + DagsHub |
+
+## Data and control flow
+
+1. **User uploads CSV** via the Pipeline page → POST to `/retrain/upload` on the API.
+2. **API persists** the file to `data/feedback/uploads/` and triggers the Airflow DAG via the Airflow REST API.
+3. **Airflow ingests** the latest upload (filename-timestamp ordered), drops leaky columns, splits, writes `train.csv` + `test.csv`.
+4. **Airflow runs drift_check** against the *previous* baselines on disk (this is the architectural fix — runs *before* preprocess overwrites baselines).
+5. **Airflow runs preprocessing** — feature engineering, scaling, computes new drift baselines + reference samples, persists them.
+6. **Airflow hot-reloads** the new baselines into the running FastAPI container (`POST /admin/reload-baselines`).
+7. **Airflow runs training** — RandomForest grid search, logs all runs to MLflow, registers the best model in the registry.
+8. **Airflow hot-reloads** the new model into FastAPI (`POST /admin/reload-model`).
+9. **Branch task** routes to `retrain_notification` (sends drift + retrain emails) if drift was real, or `no_drift_end` otherwise.
+10. **Prometheus scrapes** API metrics every 15s; **Grafana** renders them in 25 panels; **AlertManager rules** fire emails on `MultipleFeaturesDrifted`, `RetrainStorm`, etc.
+
+## Loose coupling guarantees
+
+- Frontend and backend communicate **only** via REST (`common.APIClient`).
+- Frontend's `API_URL` is configurable via env var (`http://api:8000` in Docker, `http://localhost:8000` locally).
+- The FastAPI container can be replaced or scaled independently of Streamlit.
+- The Airflow DAG hot-reloads the API via HTTP, never sharing in-process state.
