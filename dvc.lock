@@ -3,10 +3,19 @@ stages:
   data_ingestion:
     cmd: python -m src.data_ingestion
     deps:
+    - path: configs/config.local.yaml
+      hash: md5
+      md5: 4530f7094d6c723ef4b4d3f11aff135d
+      size: 2349
     - path: configs/config.yaml
       hash: md5
-      md5: 87522f0dd87c1d0a115e66dc3989cf6d
+      md5: 1d499263209569591a9435b926063c13
       size: 1279
+    - path: data/feedback/uploads
+      hash: md5
+      md5: 9dc4e32987a311443f867cfd823ba627.dir
+      size: 522048
+      nfiles: 1
     - path: data/raw/ai4i2020.csv
       hash: md5
       md5: f0adaa9c5e25366c6df1cc2684479871
@@ -31,9 +40,13 @@ stages:
   preprocessing:
     cmd: python -m src.data_preprocessing
     deps:
+    - path: configs/config.local.yaml
+      hash: md5
+      md5: 4530f7094d6c723ef4b4d3f11aff135d
+      size: 2349
     - path: configs/config.yaml
       hash: md5
-      md5: 87522f0dd87c1d0a115e66dc3989cf6d
+      md5: 1d499263209569591a9435b926063c13
       size: 1279
     - path: data/processed/test.csv
       hash: md5
@@ -56,6 +69,10 @@ stages:
       hash: md5
       md5: 133815499c9e096049d5b071b2987acb
       size: 2999
+    - path: data/baselines/ref_samples.json
+      hash: md5
+      md5: 8359ac968a03a02e634bebc910e5f733
+      size: 310743
     - path: data/processed/test_processed.csv
       hash: md5
       md5: cc8affa5ddc2ac5260ef75097625268e
@@ -71,9 +88,13 @@ stages:
   training:
     cmd: python -m src.model_training
     deps:
+    - path: configs/config.local.yaml
+      hash: md5
+      md5: 4530f7094d6c723ef4b4d3f11aff135d
+      size: 2349
     - path: configs/config.yaml
       hash: md5
-      md5: 87522f0dd87c1d0a115e66dc3989cf6d
+      md5: 1d499263209569591a9435b926063c13
       size: 1279
     - path: data/processed/test_processed.csv
       hash: md5
@@ -98,13 +119,13 @@ stages:
     outs:
     - path: models/best_model.joblib
       hash: md5
-      md5: 0cc416e4d53db70b0d6e496a77c7a1d5
-      size: 5026665
+      md5: 01297273691352095e40927918f9f614
+      size: 5867785
     - path: models/classification_report.json
       hash: md5
-      md5: 2ab00d6e62584ef8204c30f2e95ebe35
-      size: 614
+      md5: a01559dc82052c4f82a334ab2ceb669f
+      size: 625
     - path: models/test_metrics.json
       hash: md5
-      md5: 5b2b58828cba7769c035e2b29f996b97
-      size: 254
+      md5: 0c22670a9f1435ddec890e4a8316fedd
+      size: 266

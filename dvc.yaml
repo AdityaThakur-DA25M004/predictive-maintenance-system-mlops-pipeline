@@ -1,3 +1,19 @@
+# ============================================================
+# DVC Pipeline Definition — predictive maintenance
+# ============================================================
+# Both configs/config.yaml AND configs/config.local.yaml are listed
+# as deps on every stage. The Python code reads only ONE of them at
+# runtime (driven by PM_CONFIG_PATH env var), but DVC needs to track
+# both files so editing either one triggers the right re-runs:
+#
+#   - In Docker:        config.local.yaml is unchanged, config.yaml drives
+#   - Locally:          config.yaml is unchanged, config.local.yaml drives
+#   - Either way:       DVC notices when EITHER file changes
+#
+# Listing both as deps doesn't cause spurious re-runs — DVC checks
+# content hashes, so a file you didn't edit just keeps its old hash.
+# ============================================================
+
 stages:
   data_ingestion:
     cmd: python -m src.data_ingestion
@@ -5,7 +21,9 @@ stages:
       - src/data_ingestion.py
       - src/utils.py
       - data/raw/ai4i2020.csv
+      - data/feedback/uploads        # uploaded CSVs trigger re-run
       - configs/config.yaml
+      - configs/config.local.yaml    # local override
     outs:
       - data/processed/train.csv
       - data/processed/test.csv
@@ -18,11 +36,13 @@ stages:
       - data/processed/train.csv
       - data/processed/test.csv
       - configs/config.yaml
+      - configs/config.local.yaml
     outs:
       - data/processed/train_processed.csv
       - data/processed/test_processed.csv
       - models/scaler.joblib
       - data/baselines/drift_baselines.json
+      - data/baselines/ref_samples.json   # real reference samples for drift KS test
 
   training:
     cmd: python -m src.model_training
@@ -33,6 +53,7 @@ stages:
       - data/processed/train_processed.csv
       - data/processed/test_processed.csv
       - configs/config.yaml
+      - configs/config.local.yaml
     outs:
       - models/best_model.joblib
       - models/classification_report.json

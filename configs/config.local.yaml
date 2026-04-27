@@ -1,0 +1,81 @@
+# ============================================================
+# Predictive Maintenance — LOCAL config.yaml (running outside Docker)
+# ============================================================
+# Use this when running components directly on your Windows host.
+#
+# The only material difference vs the Docker config.yaml is:
+#   mlflow.tracking_uri → DagsHub HTTPS (not the in-Docker mlflow:5000)
+#
+# Note: the env var MLFLOW_TRACKING_URI in .env takes PRECEDENCE over
+# whatever is in this file (see model_training.py:118). So if you set
+# both, the env var wins. This file is the fallback default.
+# ============================================================
+
+project:
+  name: "Predictive Maintenance System"
+  version: "1.0.0"
+
+data:
+  raw_path: "data/raw/ai4i2020.csv"
+  processed_dir: "data/processed"
+  baselines_path: "data/baselines/drift_baselines.json"
+  test_size: 0.2
+  random_state: 41
+
+features:
+  numeric:
+    - "Air temperature [K]"
+    - "Process temperature [K]"
+    - "Rotational speed [rpm]"
+    - "Torque [Nm]"
+    - "Tool wear [min]"
+  categorical:
+    - "Type"
+  target: "Machine failure"
+  failure_types:
+    - "TWF"
+    - "HDF"
+    - "PWF"
+    - "OSF"
+    - "RNF"
+
+model:
+  algorithm: "RandomForest"
+  hyperparameters:
+    n_estimators: [350]
+    max_depth: [7, null]
+    min_samples_split: [4, 6]
+    class_weight: ["balanced"]
+  metrics:
+    - "f1_score"
+    - "precision"
+    - "recall"
+    - "roc_auc"
+    - "accuracy"
+
+# MLflow on DagsHub — no local server needed. Authentication uses
+# MLFLOW_TRACKING_USERNAME / MLFLOW_TRACKING_PASSWORD from .env
+# (read by mlflow.set_tracking_uri internally).
+mlflow:
+  tracking_uri: "https://dagshub.com/AdityaThakur-DA25M004/predictive-maintenance-system-mlops-pipeline.mlflow"
+  experiment_name: "predictive-maintenance"
+  model_name: "predictive-maintenance-model"
+
+api:
+  host: "127.0.0.1"        # localhost only when running outside Docker
+  port: 8000
+  latency_threshold_ms: 200
+
+monitoring:
+  drift_threshold: 0.05
+  error_rate_threshold: 0.05
+  retraining_trigger: "drift_detected"
+
+# Kept for compatibility; not used when running outside Docker.
+docker:
+  frontend_port: 8501
+  backend_port: 8000
+  mlflow_port: 5000
+  prometheus_port: 9090
+  grafana_port: 3000
+  airflow_port: 8080
