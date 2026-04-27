@@ -1,0 +1,29 @@
+# ============================================================
+# DVC + DagsHub requirements
+# ============================================================
+
+# Core DVC with S3 backend (DagsHub uses S3-compatible API)
+dvc[s3]>=3.55.0,<4.0
+
+# DagsHub helper library (optional but useful for `dagshub.init()`)
+dagshub>=0.3.0,<1.0
+
+# Pin these to fix known Windows/Linux compat issues
+pathspec>=0.12.1
+scmrepo>=3.3.0
+gitpython>=3.1.40
+
+# ML stack so `dvc repro` can execute the pipeline stages
+numpy>=1.26.0,<2.0
+pandas>=2.1.0,<3.0
+scikit-learn>=1.3.0,<2.0
+scipy>=1.11.0,<2.0
+joblib>=1.3.0,<2.0
+imbalanced-learn>=0.11.0,<1.0
+
+# MLflow client (training stage logs to MLflow)
+mlflow>=2.9.0,<3.0
+
+# Config
+pyyaml>=6.0.1,<7.0
+python-dotenv>=1.0.0,<2.0

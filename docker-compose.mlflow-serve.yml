@@ -1,0 +1,101 @@
+# ============================================================
+# Docker Compose OVERRIDE — MLflow Models Serve sidecar (v2)
+# ============================================================
+# v1 reused docker/api/Dockerfile and depended on --env-manager=local
+# matching the model's recorded deps. That assumption was wrong: the
+# api image ships mlflow 2.22.4 / sklearn 1.8.0 while the registered
+# model was logged with mlflow 2.13.2 / sklearn 1.4.2. The result was
+# the embedded serving wrapper picking uvicorn (newer mlflow) when it
+# expected gunicorn (older mlflow), plus cloudpickle protocol drift —
+# which crashed the container on startup.
+#
+# v2 uses a dedicated, version-pinned image (docker/mlflow-serve/
+# Dockerfile) that exactly matches the model's logged dependencies.
+# This is the textbook MLOps practice: serving env = training env.
+#
+# This override satisfies the assignment rubric item:
+#     "Have you used MLflow for APIification for exposing the model
+#      for inference?"
+#
+# The primary inference path remains the FastAPI service at :8000.
+# This sidecar is a parallel MLflow-native endpoint exposing only
+# POST /invocations on port :5001.
+# ============================================================
+#
+# USAGE (Windows PowerShell)
+# --------------------------
+# Build + start everything WITH the mlflow-serve sidecar:
+#   docker compose -f docker-compose.yml -f docker-compose.mlflow-serve.yml up -d --build
+#
+# Or build + start just the sidecar after main stack is already up:
+#   docker compose -f docker-compose.yml -f docker-compose.mlflow-serve.yml up -d --build mlflow-serve
+#
+# Test (PowerShell):
+#   $body = @{
+#     dataframe_split = @{
+#       columns = @("Air temperature [K]","Process temperature [K]","Rotational speed [rpm]","Torque [Nm]","Tool wear [min]","temp_diff","power","wear_degree","type_encoded","speed_torque_ratio")
+#       data = @(,@(298.1, 308.6, 1551, 42.8, 108, 10.5, 6912, 4622, 1, 36.2))
+#     }
+#   } | ConvertTo-Json -Depth 5
+#   Invoke-RestMethod -Method Post -Uri http://localhost:5001/invocations `
+#     -ContentType "application/json" -Body $body
+#
+# Stop just the sidecar:
+#   docker compose -f docker-compose.yml -f docker-compose.mlflow-serve.yml stop mlflow-serve
+#
+# Pre-requisite: a version of `predictive-maintenance-model` MUST be
+# registered in MLflow already. If no version exists this container
+# will fail to start — run a training job first via Airflow or
+# `dvc repro`.
+# ============================================================
+
+services:
+  mlflow-serve:
+    build:
+      context: .
+      dockerfile: docker/mlflow-serve/Dockerfile
+    container_name: pm-mlflow-serve
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Override these via .env if your DagsHub registry is the source
+      # of truth instead of the local MLflow container:
+      MLFLOW_TRACKING_USERNAME: ${MLFLOW_TRACKING_USERNAME:-}
+      MLFLOW_TRACKING_PASSWORD: ${MLFLOW_TRACKING_PASSWORD:-}
+      # ----------------------------------------------------------------
+      # Extend gunicorn's worker timeout. MLflow invokes gunicorn as:
+      #   gunicorn --timeout=60 -b ... -w 1 ${GUNICORN_CMD_ARGS} -- ...
+      # so anything we put here is appended AFTER --timeout=60 and
+      # gunicorn (argparse-based) takes the last value. The result is
+      # an effective --timeout=300, with --keep-alive=10 to reuse
+      # healthcheck connections.
+      # ----------------------------------------------------------------
+      GUNICORN_CMD_ARGS: "--timeout=300 --keep-alive=10 --graceful-timeout=30"
+    # --env-manager=local now means "use the pinned env baked into
+    # *this* image" — which exactly matches the model's logged
+    # dependencies. No runtime pip-install, no cross-version drift.
+    command: >
+      mlflow models serve
+        -m models:/predictive-maintenance-model/latest
+        -h 0.0.0.0
+        -p 5001
+        --env-manager=local
+    ports:
+      - "5001:5001"
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      # /ping is built into mlflow models serve — returns 200 with
+      # empty body. curl -fsS exits 0 only on 2xx, so this is a
+      # genuine liveness check.
+      test: ["CMD", "curl", "-fsS", "http://localhost:5001/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # Generous start_period: first run downloads the model from the
+      # registry (30-60s depending on artifact size), then loads it
+      # into the worker process. Don't let healthchecks fail the
+      # container during this window.
+      start_period: 90s
+    restart: unless-stopped
+    networks: [pm-net]

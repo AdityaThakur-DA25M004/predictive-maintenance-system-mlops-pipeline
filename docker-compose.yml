@@ -1,5 +1,15 @@
 # ============================================================
-# Predictive Maintenance System — Docker Compose
+# Predictive Maintenance — Docker Compose
+# ============================================================
+# Fixes applied:
+#   1. Streamlit port mismatch → use 8501 EVERYWHERE
+#   2. API/Airflow missing dill → added to requirements
+#   3. MLflow PermissionError /mlflow → --serve-artifacts
+#   4. NEW: Frontend external-tool URLs split into browser-facing
+#      (http://localhost:<host_port>) vs Docker-internal
+#      (http://<service>:<container_port>). Without this split,
+#      st.link_button rendered links like http://airflow-webserver:8080
+#      that the user's browser cannot resolve (DNS_PROBE_FINISHED_NXDOMAIN).
 # ============================================================
 
 x-airflow-common: &airflow-common
@@ -14,27 +24,43 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__API__AUTH_BACKENDS: "airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session"
     MLFLOW_TRACKING_URI: http://mlflow:5000
-    MLFLOW_TRACKING_USERNAME: ${MLFLOW_TRACKING_USERNAME}
-    MLFLOW_TRACKING_PASSWORD: ${MLFLOW_TRACKING_PASSWORD}
+    MLFLOW_TRACKING_USERNAME: ${MLFLOW_TRACKING_USERNAME:-}
+    MLFLOW_TRACKING_PASSWORD: ${MLFLOW_TRACKING_PASSWORD:-}
     PROJECT_ROOT: /app
     PYTHONPATH: /opt/airflow:/app
     UPLOADS_DIR: /app/data/feedback/uploads
+    DRIFT_REF_SAMPLES_PATH: /app/data/baselines/ref_samples.json
+    # Used by task_reload_api_baselines to hot-reload baselines into the API
+    # without requiring a container restart.
+    API_INTERNAL_URL: http://api:8000
+    RETRAIN_API_KEY: ${RETRAIN_API_KEY}
+    DVC_REMOTE_NAME: ${DVC_REMOTE_NAME:-dagshub}
+    DVC_REMOTE_URL: ${DVC_REMOTE_URL:-s3://dvc}
+    DVC_REMOTE_ENDPOINT: ${DVC_REMOTE_ENDPOINT:-}
+    DVC_ACCESS_KEY_ID: ${DVC_ACCESS_KEY_ID:-}
+    DVC_SECRET_ACCESS_KEY: ${DVC_SECRET_ACCESS_KEY:-}
+    DVC_AUTO_PUSH: ${DVC_AUTO_PUSH:-false}
+    DAGSHUB_USERNAME: ${DAGSHUB_USERNAME:-}
+    DAGSHUB_TOKEN: ${DAGSHUB_TOKEN:-}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
-    - airflow_db:/opt/airflow            # SHARED volume so all airflow containers see the same SQLite DB
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
     - ./src:/app/src
     - ./configs:/app/configs
     - ./data:/app/data
+    # CRITICAL: feedback_data overrides ./data for /app/data/feedback only.
+    # Mount this AFTER ./data:/app/data so it takes precedence.
+    - feedback_data:/app/data/feedback
     - ./models:/app/models
+    - ./scripts:/app/scripts
   depends_on:
     postgres:
       condition: service_healthy
 
 services:
-  # ── Postgres ────────────────────────────────────────────
   postgres:
     image: postgres:15-alpine
     container_name: pm-postgres
@@ -55,22 +81,30 @@ services:
     restart: unless-stopped
     networks: [pm-net]
 
-  # ── MLflow ──────────────────────────────────────────────
+  # ── MLflow ──────────────────────────────────────────────────
   mlflow:
     build:
       context: .
       dockerfile: docker/mlflow/Dockerfile
     container_name: pm-mlflow
     env_file: .env
+    environment:
+      MLFLOW_BACKEND_STORE_URI: sqlite:////mlflow/db/mlflow.db
+      MLFLOW_DEFAULT_ARTIFACT_ROOT: /mlflow/artifacts
     ports:
       - "5000:5000"
     volumes:
       - mlflow_db:/mlflow/db
       - mlflow_artifacts:/mlflow/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks: [pm-net]
 
-  # ── FastAPI Backend ─────────────────────────────────────
   api:
     build:
       context: .
@@ -85,6 +119,10 @@ services:
       FEEDBACK_DB_PATH: /app/data/feedback/feedback.db
       FEEDBACK_WINDOW: "100"
       UPLOADS_DIR: /app/data/feedback/uploads
+      DRIFT_REF_SAMPLES_PATH: /app/data/baselines/ref_samples.json
+      AIRFLOW_API_URL: http://airflow-webserver:8080
+      AIRFLOW_USERNAME: ${AIRFLOW_ADMIN_USERNAME}
+      AIRFLOW_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
     ports:
       - "${API_PORT}:8000"
     volumes:
@@ -94,13 +132,15 @@ services:
       - ./configs:/app/configs:ro
     depends_on:
       mlflow:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
     networks: [pm-net]
 
-  # ── Streamlit Frontend ──────────────────────────────────
-  # Always runs on 8501 INSIDE the container.
-  # FRONTEND_PORT maps the HOST port (e.g. 3000→8501).
+  # ── Streamlit Frontend ──────────────────────────────────────
+  # FIX 4: external-tool URLs split into BROWSER vs INTERNAL.
+  # *_URL          → opened by user's browser → must use localhost + host port
+  # *_INTERNAL_URL → used inside container by _is_reachable() health probe
+  #                  → uses Docker DNS service name + container port
   frontend:
     build:
       context: .
@@ -108,19 +148,31 @@ services:
     container_name: pm-frontend
     env_file: .env
     environment:
+      # In-container HTTP (Streamlit → API)
       API_URL: http://api:8000
-      MLFLOW_URL: http://mlflow:5000
-      AIRFLOW_URL: http://airflow-webserver:8080
-      GRAFANA_URL: http://grafana:3000
-      PROMETHEUS_URL: http://prometheus:9090
+
+      # ── BROWSER-FACING URLs (rendered as st.link_button hrefs) ────
+      API_BROWSER_URL: http://localhost:${API_PORT}
+      MLFLOW_URL:      http://localhost:5000
+      AIRFLOW_URL:     http://localhost:${AIRFLOW_PORT}
+      GRAFANA_URL:     http://localhost:${GRAFANA_PORT}
+      PROMETHEUS_URL:  http://localhost:${PROMETHEUS_PORT}
+
+      # ── INTERNAL URLs (used by _is_reachable probe inside container) ──
+      MLFLOW_INTERNAL_URL:     http://mlflow:5000
+      AIRFLOW_INTERNAL_URL:    http://airflow-webserver:8080
+      GRAFANA_INTERNAL_URL:    http://grafana:3000
+      PROMETHEUS_INTERNAL_URL: http://prometheus:9090
     ports:
+      # Same port both sides — no WebSocket pain
       - "${FRONTEND_PORT}:8501"
+    volumes:
+      - ./.streamlit/config.toml:/home/app/.streamlit/config.toml:ro
     depends_on:
       - api
     restart: unless-stopped
     networks: [pm-net]
 
-  # ── Airflow ─────────────────────────────────────────────
   airflow-init:
     <<: *airflow-common
     container_name: pm-airflow-init
@@ -129,11 +181,14 @@ services:
       - -c
       - |
         airflow db migrate &&
-        airflow users create \
+        (airflow users create \
           --username "${AIRFLOW_ADMIN_USERNAME}" \
           --password "${AIRFLOW_ADMIN_PASSWORD}" \
           --firstname Admin --lastname User --role Admin \
-          --email admin@example.com || true
+          --email admin@example.com 2>/dev/null || true) &&
+        airflow users reset-password \
+          --username "${AIRFLOW_ADMIN_USERNAME}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD}"
     restart: "no"
     networks: [pm-net]
 
@@ -147,7 +202,7 @@ services:
       airflow-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || curl -fsS http://localhost:8080/api/v1/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -165,7 +220,6 @@ services:
     restart: unless-stopped
     networks: [pm-net]
 
-  # ── Prometheus ──────────────────────────────────────────
   prometheus:
     image: prom/prometheus:v2.48.1
     container_name: pm-prometheus
@@ -181,10 +235,14 @@ services:
       - "--web.enable-lifecycle"
     depends_on:
       - api
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
     restart: unless-stopped
     networks: [pm-net]
 
-  # ── Grafana ─────────────────────────────────────────────
   grafana:
     image: grafana/grafana:10.2.3
     container_name: pm-grafana
@@ -201,7 +259,8 @@ services:
     ports:
       - "${GRAFANA_PORT}:3000"
     depends_on:
-      - prometheus
+      prometheus:
+        condition: service_healthy
     restart: unless-stopped
     networks: [pm-net]
 
@@ -216,4 +275,3 @@ volumes:
   feedback_data:
   prometheus_data:
   grafana_data:
-  airflow_db:       # Shared volume for Airflow SQLite DB
