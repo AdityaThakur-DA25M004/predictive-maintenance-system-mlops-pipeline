@@ -3,10 +3,11 @@ __pycache__/
 *.egg-info/
 venv/
 .env
-data/processed/
-data/baselines/
+data/baselines/drift_baselines.json
+data/baselines/ref_samples.json
+data/baselines/drift_report.json
 models/*.joblib
-models/*.json
+models/classification_report.json
 mlruns/
 mlflow/
 airflow/logs/
@@ -28,3 +29,18 @@ data/feedback/*.db-journal
 /ai4i2020.csv
 /drift_payload.json
 /heavily_drifted_data.csv
+
+# Ruff cache
+.ruff_cache/
+
+# Windows metadata
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# Test artifacts
+test-results.xml
+coverage.xml
+
+# DVC temp
+.dvc/tmp/

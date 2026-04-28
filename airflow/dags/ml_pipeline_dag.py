@@ -150,7 +150,7 @@ def task_model_training(**kwargs):
     return result["status"]
 
 
-def _call_api_reload(endpoint, params):
+def _call_api_reload(endpoint: str, params: dict | None = None) -> str:
     import requests
     api_url = os.environ.get("API_INTERNAL_URL", "http://api:8000")
     api_key = os.environ.get("RETRAIN_API_KEY", "")
