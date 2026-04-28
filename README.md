@@ -15,6 +15,43 @@ A production-grade predictive maintenance system that flags industrial machine f
 
 ---
 
+## 📦 Repository mirrors
+
+This project is hosted on **two platforms** that stay in sync:
+
+| Mirror | URL | Best for |
+|---|---|---|
+| 🐙 **GitHub** | [github.com/AdityaThakur-DA25M004/predictive-maintenance-system-mlops-pipeline](https://github.com/AdityaThakur-DA25M004/predictive-maintenance-system-mlops-pipeline) | Reading the code, browsing CI runs, public access |
+| 🟢 **DagsHub** | [dagshub.com/AdityaThakur-DA25M004/predictive-maintenance-system-mlops-pipeline](https://dagshub.com/AdityaThakur-DA25M004/predictive-maintenance-system-mlops-pipeline) | Pulling data + trained models via DVC, MLflow registry, full reproducibility |
+
+**Code (`.py`, `.yml`, `.md`, etc.) is identical on both.** The DVC artifacts (training data, processed splits, trained models, scaler, baselines) live **only on DagsHub** because GitHub isn't designed for large binary files.
+
+> ⚠️ **DagsHub access requires a free account.** Cloning the repo from DagsHub is public, but `dvc pull` (which fetches the actual data and model artifacts) requires you to be signed in. If you only want to read the code and look at the architecture, GitHub is the easier landing point. If you want to reproduce the pipeline end-to-end (`dvc pull` → `docker compose up` → working model), use DagsHub.
+
+### Which clone command should I use?
+
+```bash
+# Option A — GitHub (code only, no model artifacts)
+git clone https://github.com/AdityaThakur-DA25M004/predictive-maintenance-system-mlops-pipeline.git
+
+# Option B — DagsHub (code + DVC remote pre-configured for artifact pulls)
+git clone https://dagshub.com/AdityaThakur-DA25M004/predictive-maintenance-system-mlops-pipeline.git
+```
+
+After cloning from **either**, if you want to run the full pipeline you'll need DagsHub credentials configured for DVC:
+
+```bash
+# 1. Create a free account at https://dagshub.com
+# 2. Generate an access token at https://dagshub.com/user/settings/tokens
+# 3. Configure DVC locally:
+dvc remote modify origin --local auth basic
+dvc remote modify origin --local user <your-dagshub-username>
+dvc remote modify origin --local password <your-dagshub-token>
+# 4. Pull the artifacts:
+dvc pull
+```
+----
+
 ## Table of contents
 
 - [What this project does](#what-this-project-does)
@@ -658,7 +695,7 @@ For more diagnostic help, run:
 
 - **Dataset** — [AI4I 2020 Predictive Maintenance Dataset](https://archive.ics.uci.edu/dataset/601/ai4i+2020+predictive+maintenance+dataset) (UCI ML Repository)
 - **MLOps tooling** — Airflow, MLflow, DVC, DagsHub, Prometheus, Grafana
-- **Course** — DA25M004, MLOps Assignment, IIT Madras
+- **Course** — DA5402, MLOps Assignment.
 
 ---
 
