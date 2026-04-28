@@ -617,7 +617,6 @@ Screenshots demonstrating each component is operational. Captured during a clean
 | ![Pytest 42 passed](docs/screenshots/10_tests_ci/01_pytest.png) | ![Pytest summary](docs/screenshots/10_tests_ci/02_pytest_summary.png) |
 | **All 42 tests pass** | **Concise summary** for the test report |
 | ![Coverage](docs/screenshots/10_tests_ci/03_coverage.png)  |
-| **Code coverage** — `src/` and `api/` | **CI run** — green across lint, test, dvc-validate, docker-build |
 
 ---
 
