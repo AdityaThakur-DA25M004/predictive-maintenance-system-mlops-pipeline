@@ -1,7 +1,7 @@
 {
   "overall_drift": true,
-  "n_drifted": 10,
+  "n_drifted": 1,
   "n_total_features": 10,
-  "drift_pct": 1.0,
+  "drift_pct": 0.1,
   "reference_type": "real_samples"
 }

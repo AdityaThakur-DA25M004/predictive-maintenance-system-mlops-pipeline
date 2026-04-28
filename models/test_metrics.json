@@ -1,11 +1,11 @@
 {
-  "accuracy": 0.991,
-  "f1_score": 0.8548387096774194,
-  "precision": 0.9464285714285714,
-  "recall": 0.7794117647058824,
-  "roc_auc": 0.9696443794909269,
-  "true_negatives": 1929,
-  "false_positives": 3,
-  "false_negatives": 15,
-  "true_positives": 53
+  "accuracy": 0.994,
+  "f1_score": 0.90625,
+  "precision": 0.9666666666666667,
+  "recall": 0.8529411764705882,
+  "roc_auc": 0.9767080745341614,
+  "true_negatives": 1930,
+  "false_positives": 2,
+  "false_negatives": 10,
+  "true_positives": 58
 }
